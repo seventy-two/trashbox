@@ -1,0 +1,5 @@
+CLAUDE.md
+*.exe
+*.test
+*.log
+build/
