@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/seventy-two/trashbox/engine/internal/cache"
+	"github.com/seventy-two/trashbox/engine/internal/compose"
 	"github.com/seventy-two/trashbox/engine/internal/mailbox"
 )
 
@@ -357,5 +358,51 @@ func TestCodeInNewMail(t *testing.T) {
 	case c := <-got:
 		t.Fatalf("only one code expected, got another: %+v", c)
 	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+func TestReplyAndSend(t *testing.T) {
+	a := newFake(false)
+	a.add("a1", "Lunch", time.Now().Add(-time.Hour))
+	var sent []compose.Outgoing
+	var mu sync.Mutex
+	send := func(_ context.Context, o compose.Outgoing) error {
+		mu.Lock()
+		defer mu.Unlock()
+		sent = append(sent, o)
+		return nil
+	}
+	h := start(t, fast, []Account{{ID: "a@x", Kind: "gmail", Provider: a, Send: send}, {ID: "b@x", Kind: "gmail", Provider: newFake(false)}})
+	h.wait("synced", func(m map[string]any) bool { return m["t"] == "changed" })
+	h.send(map[string]any{"t": "list", "view": "unified", "req": 1})
+	id := h.wait("list", isT("list"))["messages"].([]any)[0].(map[string]any)["id"]
+
+	h.send(map[string]any{"t": "draft", "id": id, "all": true, "req": 2})
+	d := h.wait("draft", isT("draft"))["draft"].(map[string]any)
+	if d["from"] != "a@x" || d["to"] != "Ann <ann@x.com>" || d["subject"] != "Re: Lunch" || !strings.Contains(d["body"].(string), "> Hello there") {
+		t.Fatalf("draft %v", d)
+	}
+
+	d["body"] = "Sounds good.\n" + d["body"].(string)
+	h.send(map[string]any{"t": "send", "draft": d, "req": 3})
+	if r := h.wait("sent", func(m map[string]any) bool { return m["req"] == float64(3) }); r["t"] != "sent" {
+		t.Fatalf("send reply %v", r)
+	}
+	mu.Lock()
+	if len(sent) != 1 || sent[0].Rcpts[0] != "ann@x.com" || !strings.Contains(string(sent[0].Raw), "Sounds good.") {
+		t.Errorf("sent %+v", sent)
+	}
+	mu.Unlock()
+
+	// Mistakes come back as errors, against the request.
+	d["to"] = "ann@"
+	h.send(map[string]any{"t": "send", "draft": d, "req": 4})
+	if r := h.wait("bad address", func(m map[string]any) bool { return m["req"] == float64(4) }); r["t"] != "error" {
+		t.Errorf("bad address: %v", r)
+	}
+	d["to"], d["from"] = "ann@x.com", "b@x"
+	h.send(map[string]any{"t": "send", "draft": d, "req": 5})
+	if r := h.wait("can't send", func(m map[string]any) bool { return m["req"] == float64(5) }); r["t"] != "error" {
+		t.Errorf("account without sending: %v", r)
 	}
 }

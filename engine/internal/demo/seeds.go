@@ -19,6 +19,7 @@ type seed struct {
 	seen    bool
 	flagged bool
 	attach  bool
+	cc      string // others on the message, for reply all
 }
 
 const (
@@ -144,7 +145,7 @@ func accounts() []account {
 		inbox: []seed{
 			{ago: 4 * minute, name: "Fernhill Bank", addr: "no-reply@fernhill.example", subject: "Your sign-in code",
 				text: "Your Fernhill sign-in code is 482913.\n\nIt expires in 10 minutes. If this wasn't you, you can ignore this email."},
-			{ago: 40 * minute, name: "Priya Shah", addr: "priya@example.org", subject: "Sunday roast?",
+			{ago: 40 * minute, name: "Priya Shah", addr: "priya@example.org", subject: "Sunday roast?", cc: "Tom Okafor <tom.okafor@example.net>, Jo Lindqvist <jo@lindqvist.example>",
 				text: "Are you still up for Sunday? I'm thinking the place by the river, about 1pm.\n\nSam's coming too, and might bring the dog.\n\nP"},
 			{ago: 75 * minute, name: "Slow Travel Weekly", addr: "letters@slowtravel.example.com", subject: "The quiet return of the night train", html: nightTrain()},
 			{ago: 2*hour + 10*minute, name: "Cloudberry Energy", addr: "statements@cloudberry.example", subject: "Your November statement", html: energy},

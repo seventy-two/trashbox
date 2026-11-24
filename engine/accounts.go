@@ -7,7 +7,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/seventy-two/trashbox/engine/internal/compose"
 	"github.com/seventy-two/trashbox/engine/internal/engine"
+	"github.com/seventy-two/trashbox/engine/internal/gmail"
 	"github.com/seventy-two/trashbox/engine/internal/graph"
 	"github.com/seventy-two/trashbox/engine/internal/imapmail"
 	"github.com/seventy-two/trashbox/engine/internal/mailbox"
@@ -55,6 +57,7 @@ func providers(st *store.Store, cfg store.Config, logger *log.Logger) []engine.A
 	var out []engine.Account
 	for _, a := range cfg.Accounts {
 		var p mailbox.Provider
+		var send func(context.Context, compose.Outgoing) error
 		switch a.Kind {
 		case store.Outlook:
 			ms, err := msConfig(cfg)
@@ -63,7 +66,13 @@ func providers(st *store.Store, cfg store.Config, logger *log.Logger) []engine.A
 				continue
 			}
 			ts := &tokenSource{ms: ms, st: st, acc: a}
-			p = &graph.Mailbox{C: &graph.Client{Tokens: ts.Token}}
+			gc := &graph.Client{Tokens: ts.Token}
+			p = &graph.Mailbox{C: gc}
+			// Graph reads the recipients from the message, so Bcc goes in it
+			// (Exchange takes it out again before delivery).
+			send = func(ctx context.Context, m compose.Outgoing) error {
+				return gc.SendMIME(ctx, append([]byte(m.BccHeader), m.Raw...))
+			}
 		case store.Gmail:
 			pass, err := st.Secret(a)
 			if err != nil {
@@ -71,11 +80,15 @@ func providers(st *store.Store, cfg store.Config, logger *log.Logger) []engine.A
 				continue
 			}
 			p = &imapmail.Mailbox{Addr: "imap.gmail.com:993", User: a.Address, Pass: pass}
+			user := a.Address
+			send = func(_ context.Context, m compose.Outgoing) error {
+				return gmail.Default.SendRaw(user, pass, m.Rcpts, m.Raw)
+			}
 		default:
 			logger.Printf("%s: unknown account kind %q", a.Address, a.Kind)
 			continue
 		}
-		out = append(out, engine.Account{ID: a.Address, Kind: a.Kind, Provider: p})
+		out = append(out, engine.Account{ID: a.Address, Kind: a.Kind, Provider: p, Send: send})
 	}
 	return out
 }

@@ -168,3 +168,16 @@ func TestSendText(t *testing.T) {
 		}
 	}
 }
+
+func TestSendRawBccOnlyInEnvelope(t *testing.T) {
+	addr, got := fakeSMTP(t)
+	s := Servers{SMTP: addr, Insecure: true}
+	raw := []byte("From: <me@gmail.com>\r\nTo: <a@x.com>\r\nSubject: hi\r\n\r\nhello\r\n")
+	if err := s.SendRaw("me@gmail.com", "pw", []string{"a@x.com", "hidden@x.com"}, raw); err != nil {
+		t.Fatal(err)
+	}
+	log := <-got
+	if !strings.Contains(log, "RCPT TO:<hidden@x.com>") || strings.Count(log, "hidden@") != 1 {
+		t.Errorf("envelope:\n%s", log)
+	}
+}

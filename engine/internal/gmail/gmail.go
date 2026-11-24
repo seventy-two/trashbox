@@ -156,6 +156,12 @@ func BuildText(from string, to []string, subject, body string, now time.Time) []
 
 // SendText sends a plain-text message. Gmail files it in Sent by itself.
 func (s Servers) SendText(user, pass string, to []string, subject, body string) error {
+	return s.SendRaw(user, pass, to, BuildText(user, to, subject, body, time.Now()))
+}
+
+// SendRaw sends a whole RFC 5322 message to rcpts (the envelope: Bcc
+// recipients go here, never in raw's headers).
+func (s Servers) SendRaw(user, pass string, rcpts []string, raw []byte) error {
 	host, _, err := net.SplitHostPort(s.SMTP)
 	if err != nil {
 		return err
@@ -169,6 +175,7 @@ func (s Servers) SendText(user, pass string, to []string, subject, body string) 
 	if err != nil {
 		return fmt.Errorf("smtp connect: %w", err)
 	}
+	conn.SetDeadline(time.Now().Add(5 * time.Minute))
 	c, err := smtp.NewClient(conn, host)
 	if err != nil {
 		conn.Close()
@@ -181,7 +188,7 @@ func (s Servers) SendText(user, pass string, to []string, subject, body string) 
 	if err := c.Mail(user); err != nil {
 		return fmt.Errorf("smtp from: %w", err)
 	}
-	for _, r := range to {
+	for _, r := range rcpts {
 		if err := c.Rcpt(r); err != nil {
 			return fmt.Errorf("smtp to %s: %w", r, err)
 		}
@@ -190,7 +197,7 @@ func (s Servers) SendText(user, pass string, to []string, subject, body string) 
 	if err != nil {
 		return fmt.Errorf("smtp data: %w", err)
 	}
-	if _, err := w.Write(BuildText(user, to, subject, body, time.Now())); err != nil {
+	if _, err := w.Write(raw); err != nil {
 		return err
 	}
 	if err := w.Close(); err != nil {

@@ -2,9 +2,11 @@ package graph
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -86,5 +88,20 @@ func TestErrorDecoded(t *testing.T) {
 	var ge *Error
 	if !errors.As(err, &ge) || ge.Status != 403 || ge.Code != "ErrorAccessDenied" {
 		t.Fatalf("err %v", err)
+	}
+}
+
+func TestSendMIME(t *testing.T) {
+	raw := "Bcc: <x@y>\r\nTo: <a@b>\r\nSubject: hi\r\n\r\nhello\r\n"
+	c := fake(t, func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		got, err := base64.StdEncoding.DecodeString(string(b))
+		if r.URL.Path != "/me/sendMail" || r.Header.Get("Content-Type") != "text/plain" || err != nil || string(got) != raw {
+			t.Errorf("%s %s %q %v", r.URL.Path, r.Header.Get("Content-Type"), got, err)
+		}
+		w.WriteHeader(http.StatusAccepted)
+	})
+	if err := c.SendMIME(context.Background(), []byte(raw)); err != nil {
+		t.Fatal(err)
 	}
 }

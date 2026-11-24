@@ -14,6 +14,9 @@
 //	open id [remote]                       -> {"t":"body","id","page":{url,hasRemote,remote},"from",...}
 //	   doesn't mark the message read: send "seen" for that
 //	seen ids seen                          -> marks read/unread on the server and in the cache
+//	draft id all                           -> {"t":"draft","draft":{from,to,cc,bcc,subject,body,inReplyTo,references}}
+//	   a reply to message id (all: to everyone on it), from its account
+//	send draft                             -> {"t":"sent","account"} once the server has it
 //	sync                                   -> checks every account now
 //	quit
 //
@@ -39,6 +42,7 @@ import (
 
 	"github.com/seventy-two/trashbox/engine/internal/cache"
 	"github.com/seventy-two/trashbox/engine/internal/codes"
+	"github.com/seventy-two/trashbox/engine/internal/compose"
 	"github.com/seventy-two/trashbox/engine/internal/htmltext"
 	"github.com/seventy-two/trashbox/engine/internal/mailbox"
 	"github.com/seventy-two/trashbox/engine/internal/mailparse"
@@ -72,6 +76,8 @@ type Account struct {
 	ID       string // the address
 	Kind     string
 	Provider mailbox.Provider
+	// Send sends a message from the account; nil if it can't.
+	Send func(ctx context.Context, m compose.Outgoing) error
 }
 
 // Engine runs the accounts and answers the window.
@@ -198,6 +204,10 @@ func (e *Engine) handle(ctx context.Context, cmd map[string]any) {
 		err = e.cmdOpen(ctx, cmd, reply)
 	case "seen":
 		err = e.cmdSeen(ctx, cmd)
+	case "draft":
+		err = e.cmdDraft(ctx, cmd, reply)
+	case "send":
+		err = e.cmdSend(ctx, cmd, reply)
 	case "sync":
 		for _, a := range e.accounts {
 			a.poke()
@@ -316,30 +326,8 @@ func (e *Engine) cmdList(ctx context.Context, cmd map[string]any, reply func(map
 
 func (e *Engine) cmdOpen(ctx context.Context, cmd map[string]any, reply func(map[string]any)) error {
 	id := num(cmd, "id")
-	m, err := e.cache.Get(id)
+	m, parsed, err := e.parsed(ctx, id)
 	if err != nil {
-		return fmt.Errorf("message %d: %w", id, err)
-	}
-	raw, ok, err := e.cache.Body(id)
-	if err != nil {
-		return err
-	}
-	var parsed *mailparse.Message
-	if !ok {
-		a, err := e.account(m.Account)
-		if err != nil {
-			return err
-		}
-		if raw, err = a.Provider.Raw(ctx, m.Folder, m.RID); err != nil {
-			return err
-		}
-		if parsed, err = mailparse.Parse(raw); err != nil {
-			return err
-		}
-		if err := e.cache.SaveBody(id, raw, snippetOf(parsed)); err != nil {
-			e.log.Printf("saving body %d: %v", id, err)
-		}
-	} else if parsed, err = mailparse.Parse(raw); err != nil {
 		return err
 	}
 	remote, _ := cmd["remote"].(bool)
@@ -385,6 +373,76 @@ func (e *Engine) keepView(name string) {
 		keep[v] = true
 	}
 	view.Prune(e.viewDir, keep)
+}
+
+// parsed returns a message's parsed source, fetching it if it isn't cached.
+func (e *Engine) parsed(ctx context.Context, id int64) (cache.Message, *mailparse.Message, error) {
+	m, err := e.cache.Get(id)
+	if err != nil {
+		return m, nil, fmt.Errorf("message %d: %w", id, err)
+	}
+	raw, ok, err := e.cache.Body(id)
+	if err != nil {
+		return m, nil, err
+	}
+	if !ok {
+		a, err := e.account(m.Account)
+		if err != nil {
+			return m, nil, err
+		}
+		if raw, err = a.Provider.Raw(ctx, m.Folder, m.RID); err != nil {
+			return m, nil, err
+		}
+	}
+	p, err := mailparse.Parse(raw)
+	if err != nil {
+		return m, nil, err
+	}
+	if !ok {
+		if err := e.cache.SaveBody(id, raw, snippetOf(p)); err != nil {
+			e.log.Printf("saving body %d: %v", id, err)
+		}
+	}
+	return m, p, nil
+}
+
+func (e *Engine) cmdDraft(ctx context.Context, cmd map[string]any, reply func(map[string]any)) error {
+	m, p, err := e.parsed(ctx, num(cmd, "id"))
+	if err != nil {
+		return err
+	}
+	all, _ := cmd["all"].(bool)
+	reply(map[string]any{"t": "draft", "id": m.ID, "draft": compose.Reply(p, m.Account, all)})
+	return nil
+}
+
+func (e *Engine) cmdSend(ctx context.Context, cmd map[string]any, reply func(map[string]any)) error {
+	var d compose.Draft
+	b, _ := json.Marshal(cmd["draft"])
+	if err := json.Unmarshal(b, &d); err != nil {
+		return fmt.Errorf("bad draft: %w", err)
+	}
+	a, err := e.account(d.From)
+	if err != nil {
+		return err
+	}
+	if a.Send == nil {
+		return fmt.Errorf("%s can't send mail", a.ID)
+	}
+	out, err := compose.Build(d, time.Now())
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	if err := a.Send(ctx, out); err != nil {
+		e.log.Printf("%s: sending: %v", a.ID, err)
+		return fmt.Errorf("not sent: %w", err)
+	}
+	e.log.Printf("%s: sent a message to %d recipient(s)", a.ID, len(out.Rcpts))
+	reply(map[string]any{"t": "sent", "account": a.ID})
+	a.poke() // Sent has changed
+	return nil
 }
 
 func (e *Engine) cmdSeen(ctx context.Context, cmd map[string]any) error {

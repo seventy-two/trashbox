@@ -5,6 +5,7 @@ package graph
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -46,7 +47,7 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 		}
 		body = bytes.NewReader(b)
 	}
-	return c.send(ctx, method, path, body, func(r io.Reader) error {
+	return c.send(ctx, method, path, body, "application/json", func(r io.Reader) error {
 		if out == nil {
 			return nil
 		}
@@ -56,12 +57,12 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 
 // doRaw is do for responses that aren't JSON.
 func (c *Client) doRaw(ctx context.Context, method, path string, read func(io.Reader) error) error {
-	return c.send(ctx, method, path, nil, read)
+	return c.send(ctx, method, path, nil, "", read)
 }
 
 // send makes one request. path is relative to Base, or an absolute URL such
 // as an @odata.nextLink.
-func (c *Client) send(ctx context.Context, method, path string, body io.Reader, read func(io.Reader) error) error {
+func (c *Client) send(ctx context.Context, method, path string, body io.Reader, contentType string, read func(io.Reader) error) error {
 	u := path
 	if !strings.HasPrefix(path, "https://") && !strings.HasPrefix(path, "http://") {
 		base := c.Base
@@ -87,7 +88,7 @@ func (c *Client) send(ctx context.Context, method, path string, body io.Reader, 
 	req.Header.Add("Prefer", `IdType="ImmutableId"`)
 	req.Header.Add("Prefer", "odata.maxpagesize=200")
 	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Content-Type", contentType)
 	}
 	hc := c.HTTP
 	if hc == nil {
@@ -195,4 +196,11 @@ func (c *Client) SendText(ctx context.Context, to []string, subject, body string
 		"saveToSentItems": true,
 	}
 	return c.do(ctx, http.MethodPost, "/me/sendMail", msg, nil)
+}
+
+// SendMIME sends a whole RFC 5322 message, recipients (Bcc included) taken
+// from its headers, and keeps a copy in Sent Items.
+func (c *Client) SendMIME(ctx context.Context, raw []byte) error {
+	body := base64.StdEncoding.EncodeToString(raw)
+	return c.send(ctx, http.MethodPost, "/me/sendMail", strings.NewReader(body), "text/plain", func(io.Reader) error { return nil })
 }

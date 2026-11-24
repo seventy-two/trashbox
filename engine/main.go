@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/seventy-two/trashbox/engine/internal/cache"
+	"github.com/seventy-two/trashbox/engine/internal/compose"
 	"github.com/seventy-two/trashbox/engine/internal/demo"
 	"github.com/seventy-two/trashbox/engine/internal/engine"
 
@@ -43,6 +44,7 @@ trashbox-engine spike <command> [flags]
   gmail-add                       add a Gmail account with an app password
   gmail-check   [-account a]
   gmail-send    [-account a] [-to b]
+  send-test     [-account a] [-to b] [-bcc c]   send through the window's own path (compose + provider)
 `
 
 func main() {
@@ -124,6 +126,7 @@ func spike(cmd string, args []string) error {
 	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
 	account := fs.String("account", "", "account address")
 	to := fs.String("to", "", "recipient (default: the account itself)")
+	bcc := fs.String("bcc", "", "a Bcc recipient (send-test)")
 	fs.Parse(args)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
@@ -205,6 +208,32 @@ func spike(cmd string, args []string) error {
 		fmt.Printf("%s: %d in inbox, %d unread\n", a.Address, counts.Total, counts.Unread)
 		for _, m := range recent {
 			printMsg(m.Received, m.Read, m.From, m.Subject)
+		}
+		return nil
+
+	case "send-test":
+		accts := providers(st, cfg, log.New(os.Stderr, "", 0))
+		for _, a := range accts {
+			if *account != "" && !strings.EqualFold(a.ID, *account) {
+				continue
+			}
+			rcpt := *to
+			if rcpt == "" {
+				rcpt = a.ID
+			}
+			d := compose.Draft{From: a.ID, To: rcpt, Bcc: *bcc, Subject: "trashbox compose test " + time.Now().Format("15:04:05"),
+				Body: "Sent by trashbox's compose path from " + a.ID + ".\n\nA café, a long line to check wrapping: " + strings.Repeat("words ", 20) + "\n"}
+			out, err := compose.Build(d, time.Now())
+			if err != nil {
+				return err
+			}
+			if err := a.Send(ctx, out); err != nil {
+				return fmt.Errorf("%s: %w", a.ID, err)
+			}
+			fmt.Printf("Sent %q from %s to %s\n", d.Subject, a.ID, rcpt)
+			if *account == "" {
+				return nil // one is enough unless asked
+			}
 		}
 		return nil
 

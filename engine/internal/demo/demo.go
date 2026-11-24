@@ -4,6 +4,7 @@ package demo
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -11,19 +12,24 @@ import (
 	"sync"
 	"time"
 
+	"github.com/seventy-two/trashbox/engine/internal/compose"
 	"github.com/seventy-two/trashbox/engine/internal/engine"
 	"github.com/seventy-two/trashbox/engine/internal/mailbox"
+	"github.com/seventy-two/trashbox/engine/internal/mailparse"
 )
 
 type msg struct {
 	h    mailbox.Header
 	html string
 	text string
+	cc   string
+	raw  []byte // as sent, for messages sent from the demo
 }
 
 // Provider is one demo account.
 type Provider struct {
-	codes   bool // gets the TRASHBOX_DEMO_CODE email
+	id      string // the account's address
+	codes   bool   // gets the TRASHBOX_DEMO_CODE email
 	mu      sync.Mutex
 	folders []mailbox.Folder
 	msgs    map[string][]*msg // folder → messages
@@ -40,7 +46,7 @@ type account struct {
 }
 
 func build(now time.Time, a account) *Provider {
-	p := &Provider{msgs: map[string][]*msg{}, codes: a.codes}
+	p := &Provider{id: a.id, msgs: map[string][]*msg{}, codes: a.codes}
 	p.folders = []mailbox.Folder{
 		{ID: "inbox", Name: "Inbox", Role: mailbox.RoleInbox},
 		{ID: "sent", Name: "Sent", Role: mailbox.RoleSent},
@@ -56,7 +62,7 @@ func build(now time.Time, a account) *Provider {
 			RID: fmt.Sprintf("%s-%d", folder, n), Date: now.Add(-s.ago).Truncate(time.Second),
 			FromName: s.name, FromAddr: s.addr, To: "Me", Subject: s.subject,
 			Seen: s.seen, Flagged: s.flagged, Attach: s.attach,
-		}, html: s.html, text: s.text}
+		}, html: s.html, text: s.text, cc: s.cc}
 		p.msgs[folder] = append(p.msgs[folder], m)
 	}
 	for _, s := range a.inbox {
@@ -81,7 +87,8 @@ func Accounts() []engine.Account {
 	}
 	var out []engine.Account
 	for _, a := range accounts() {
-		out = append(out, engine.Account{ID: a.id, Kind: a.kind, Provider: build(now, a)})
+		p := build(now, a)
+		out = append(out, engine.Account{ID: a.id, Kind: a.kind, Provider: p, Send: p.Send})
 	}
 	return out
 }
@@ -144,9 +151,15 @@ func (p *Provider) Raw(_ context.Context, folder, rid string) ([]byte, error) {
 		if m.h.RID != rid {
 			continue
 		}
+		if m.raw != nil {
+			return m.raw, nil
+		}
 		var b strings.Builder
-		fmt.Fprintf(&b, "From: %q <%s>\r\nTo: Me <me@example.com>\r\nSubject: %s\r\nDate: %s\r\nMIME-Version: 1.0\r\n",
-			m.h.FromName, m.h.FromAddr, m.h.Subject, m.h.Date.Format(time.RFC1123Z))
+		fmt.Fprintf(&b, "From: %q <%s>\r\nTo: Me <%s>\r\nSubject: %s\r\nDate: %s\r\nMessage-ID: <%s@demo.example>\r\nMIME-Version: 1.0\r\n",
+			m.h.FromName, m.h.FromAddr, p.id, m.h.Subject, m.h.Date.Format(time.RFC1123Z), m.h.RID)
+		if m.cc != "" {
+			fmt.Fprintf(&b, "Cc: %s\r\n", m.cc)
+		}
 		body, ct := m.text, "text/plain"
 		if m.html != "" {
 			body, ct = m.html, "text/html"
@@ -196,6 +209,33 @@ func (p *Provider) Watch(ctx context.Context, folder string, changed func()) err
 	changed()
 	<-ctx.Done()
 	return ctx.Err()
+}
+
+// Send files the message in Sent, as Gmail and Outlook do. Nothing leaves
+// the machine. TRASHBOX_DEMO_SENDFAIL makes it fail, to test the window.
+func (p *Provider) Send(_ context.Context, o compose.Outgoing) error {
+	if os.Getenv("TRASHBOX_DEMO_SENDFAIL") != "" {
+		return errors.New("the demo server said no")
+	}
+	m, err := mailparse.Parse(o.Raw)
+	if err != nil {
+		return err
+	}
+	to := make([]string, 0, len(m.To))
+	for _, a := range m.To {
+		if a.Name != "" {
+			to = append(to, a.Name)
+		} else {
+			to = append(to, a.Addr)
+		}
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.msgs["sent"] = append(p.msgs["sent"], &msg{h: mailbox.Header{
+		RID: fmt.Sprintf("sent-%d", time.Now().UnixNano()), Date: time.Now().Truncate(time.Second),
+		FromName: "Me", FromAddr: p.id, To: strings.Join(to, ", "), Subject: m.Subject, Seen: true,
+	}, raw: o.Raw})
+	return nil
 }
 
 // Close does nothing.
