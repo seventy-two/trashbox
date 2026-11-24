@@ -165,6 +165,19 @@ private:
     RECT paneRect_{};
     Draft draft_;
     int64_t draftReq_ = 0, sendReq_ = 0;
+
+    // Search: while searchQ_ is set, the list holds its results.
+    std::string searchText_;   // what's in the box
+    std::string searchQ_;      // what was last searched for
+    double searchEdited_ = 0;  // when the box last changed (searched after a pause)
+    bool searchDirty_ = false;
+    int64_t searchReq_ = 0;
+    bool searchDone_ = true;
+    std::vector<std::string> searchFailed_;
+    bool focusSearch_ = false;
+    void runSearch();
+    void endSearch();
+    bool searching() const { return !searchQ_.empty(); }
     bool paneHidden_ = true;
 
     int newCount_ = 0;

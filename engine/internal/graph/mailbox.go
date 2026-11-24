@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -203,6 +204,31 @@ func (b *Mailbox) Older(ctx context.Context, folder string, before time.Time, n 
 		out = append(out, m.header())
 	}
 	return out, len(page.Value) == n, nil
+}
+
+// Search asks Graph to search every folder ($search: subject, body,
+// people), newest first.
+func (b *Mailbox) Search(ctx context.Context, _ string, q string, n int) ([]mailbox.Found, error) {
+	v := url.Values{
+		"$search": {`"` + strings.ReplaceAll(strings.ReplaceAll(q, `\`, ``), `"`, ``) + `"`},
+		"$select": {headerSelect + ",parentFolderId"},
+		"$top":    {fmt.Sprint(n)},
+	}
+	var page struct {
+		Value []struct {
+			message
+			Folder string `json:"parentFolderId"`
+		} `json:"value"`
+	}
+	if err := b.C.do(ctx, http.MethodGet, "/me/messages?"+v.Encode(), nil, &page); err != nil {
+		return nil, err
+	}
+	out := make([]mailbox.Found, 0, len(page.Value))
+	for _, m := range page.Value {
+		out = append(out, mailbox.Found{Folder: m.Folder, Header: m.header()})
+	}
+	slices.SortFunc(out, func(a, b mailbox.Found) int { return b.Date.Compare(a.Date) })
+	return out, nil
 }
 
 // Raw fetches the MIME source. Reading it doesn't mark the message read.

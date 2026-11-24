@@ -211,6 +211,31 @@ func (p *Provider) Watch(ctx context.Context, folder string, changed func()) err
 	return ctx.Err()
 }
 
+// Search looks through every folder's made-up mail.
+func (p *Provider) Search(_ context.Context, _ string, q string, n int) ([]mailbox.Found, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	words := strings.Fields(strings.ToLower(q))
+	var out []mailbox.Found
+	for folder, ms := range p.msgs {
+		for _, m := range ms {
+			hay := strings.ToLower(m.h.Subject + " " + m.h.FromName + " " + m.h.FromAddr + " " + m.text + " " + m.html)
+			ok := true
+			for _, w := range words {
+				ok = ok && strings.Contains(hay, w)
+			}
+			if ok {
+				out = append(out, mailbox.Found{Folder: folder, Header: m.h})
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Date.After(out[j].Date) })
+	if len(out) > n {
+		out = out[:n]
+	}
+	return out, nil
+}
+
 // Send files the message in Sent, as Gmail and Outlook do. Nothing leaves
 // the machine. TRASHBOX_DEMO_SENDFAIL makes it fail, to test the window.
 func (p *Provider) Send(_ context.Context, o compose.Outgoing) error {

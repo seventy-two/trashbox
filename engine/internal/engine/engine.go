@@ -18,6 +18,8 @@
 //	   a reply to message id (all: to everyone on it), from its account
 //	send draft                             -> {"t":"sent","account"} once the server has it
 //	   draft.attachments are paths of files on this PC
+//	search q                               -> {"t":"search","q","messages","done":false} from the cache at once,
+//	   then again with "done":true once each account's server has been searched
 //	save id index path                     -> {"t":"saved","path"}: writes attachment index to path
 //	sync                                   -> checks every account now
 //	quit
@@ -241,6 +243,8 @@ func (e *Engine) handle(ctx context.Context, cmd map[string]any) {
 		err = e.cmdSend(ctx, cmd, reply)
 	case "save":
 		err = e.cmdSave(ctx, cmd, reply)
+	case "search":
+		err = e.cmdSearch(ctx, cmd, reply)
 	case "sync":
 		for _, a := range e.accounts {
 			a.poke()
@@ -496,6 +500,131 @@ func (e *Engine) cmdSave(ctx context.Context, cmd map[string]any, reply func(map
 	}
 	reply(map[string]any{"t": "saved", "path": path})
 	return nil
+}
+
+func (e *Engine) cmdSearch(ctx context.Context, cmd map[string]any, reply func(map[string]any)) error {
+	q := strings.TrimSpace(str(cmd, "q"))
+	local, err := e.searchCache(q)
+	if err != nil {
+		return err
+	}
+	if q == "" {
+		reply(map[string]any{"t": "search", "q": q, "messages": local, "done": true})
+		return nil
+	}
+	reply(map[string]any{"t": "search", "q": q, "messages": local, "done": false})
+
+	// Then each account's server, for mail older than the cache holds.
+	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var failed []string
+	for _, a := range e.accounts {
+		s, ok := a.Provider.(mailbox.Searcher)
+		if !ok {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			folder := a.searchFolder()
+			found, err := s.Search(ctx, folder, q, 50)
+			if err == nil {
+				err = e.addFound(a.ID, found)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				e.log.Printf("%s: search: %v", a.ID, err)
+				failed = append(failed, a.ID)
+				return
+			}
+			// Show each account's finds as they come: Gmail's can be slow.
+			if ms, err := e.searchCache(q); err == nil && ctx.Err() == nil {
+				reply(map[string]any{"t": "search", "q": q, "messages": ms, "done": false})
+			}
+		}()
+	}
+	wg.Wait()
+	all, err := e.searchCache(q)
+	if err != nil {
+		return err
+	}
+	out := map[string]any{"t": "search", "q": q, "messages": all, "done": true}
+	if len(failed) > 0 {
+		slices.Sort(failed)
+		out["failed"] = failed
+	}
+	reply(out)
+	return nil
+}
+
+// searchFolder is where an account searches on the server one folder at a
+// time: All Mail if it has one, else the inbox.
+func (a *account) searchFolder() string {
+	fs, err := a.e.cache.Folders(a.ID)
+	if err == nil {
+		for _, f := range fs {
+			if f.Role == mailbox.RoleAll {
+				return f.ID
+			}
+		}
+	}
+	return a.inboxID()
+}
+
+func (e *Engine) addFound(account string, found []mailbox.Found) error {
+	byFolder := map[string][]mailbox.Header{}
+	for _, f := range found {
+		byFolder[f.Folder] = append(byFolder[f.Folder], f.Header)
+	}
+	for folder, hs := range byFolder {
+		if err := e.cache.AddFound(account, folder, hs); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// searchCache searches the cache, showing each message once: Gmail keeps
+// a copy in All Mail of everything, so the other folder's copy wins.
+func (e *Engine) searchCache(q string) ([]cache.Message, error) {
+	ms, err := e.cache.Search(q, 300)
+	if err != nil {
+		return nil, err
+	}
+	allFolder := map[string]string{} // account → its All Mail
+	for _, a := range e.accounts {
+		if fs, err := e.cache.Folders(a.ID); err == nil {
+			for _, f := range fs {
+				if f.Role == mailbox.RoleAll {
+					allFolder[a.ID] = f.ID
+				}
+			}
+		}
+	}
+	type key struct {
+		account, from, subject string
+		date                   int64
+	}
+	at := map[key]int{}
+	out := []cache.Message{}
+	for _, m := range ms {
+		k := key{m.Account, m.FromAddr, m.Subject, m.Date}
+		if i, ok := at[k]; ok {
+			if out[i].Folder == allFolder[m.Account] {
+				out[i] = m
+			}
+			continue
+		}
+		at[k] = len(out)
+		out = append(out, m)
+	}
+	if len(out) > 200 {
+		out = out[:200]
+	}
+	return out, nil
 }
 
 // ---- new mail for kitchensink ----

@@ -455,3 +455,39 @@ saved:
 		t.Errorf("saving to a relative path: %v", r)
 	}
 }
+
+// searching is a fake account that can also search its server, which has
+// one message older than anything synced.
+type searching struct{ *fake }
+
+func (s searching) Search(_ context.Context, folder, q string, n int) ([]mailbox.Found, error) {
+	return []mailbox.Found{{Folder: "IN", Header: mailbox.Header{RID: "ancient", Subject: "Lunch in 2020", Date: time.Date(2020, 5, 1, 12, 0, 0, 0, time.UTC)}}}, nil
+}
+
+func TestSearch(t *testing.T) {
+	a := newFake(false)
+	a.add("a1", "Lunch on Friday", time.Now().Add(-time.Hour))
+	a.add("a2", "Something else", time.Now().Add(-2*time.Hour))
+	h := start(t, fast, []Account{{ID: "a@x", Kind: "gmail", Provider: searching{a}}})
+	h.wait("synced", func(m map[string]any) bool { return m["t"] == "changed" })
+
+	h.send(map[string]any{"t": "search", "q": "lunch", "req": 1})
+	first := h.wait("cache results", isT("search"))
+	if first["done"] != false || strings.Join(subjectsOf(first), "|") != "Lunch on Friday" {
+		t.Fatalf("first %v", first)
+	}
+	done := h.wait("server results", func(m map[string]any) bool { return m["t"] == "search" && m["done"] == true })
+	if done["done"] != true || strings.Join(subjectsOf(done), "|") != "Lunch on Friday|Lunch in 2020" {
+		t.Fatalf("done %v", done)
+	}
+	// The old one opens, but doesn't join the inbox list.
+	id := done["messages"].([]any)[1].(map[string]any)["id"]
+	h.send(map[string]any{"t": "open", "id": id, "req": 2})
+	if r := h.wait("open", func(m map[string]any) bool { return m["req"] == float64(2) }); r["t"] != "body" {
+		t.Errorf("open %v", r)
+	}
+	h.send(map[string]any{"t": "list", "view": "unified", "req": 3})
+	if l := h.wait("list", isT("list")); len(subjectsOf(l)) != 2 {
+		t.Errorf("inbox list %v", subjectsOf(l))
+	}
+}

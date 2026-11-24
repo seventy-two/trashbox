@@ -163,3 +163,22 @@ func TestTokensFuncUsed(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestSearchEveryFolder(t *testing.T) {
+	b := &Mailbox{C: fake(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/me/messages" || r.URL.Query().Get("$search") != `"sunday roast"` ||
+			!strings.Contains(r.URL.Query().Get("$select"), "parentFolderId") {
+			t.Errorf("url %v", r.URL)
+		}
+		fmt.Fprint(w, `{"value":[
+			{"id":"m1","subject":"Old roast","receivedDateTime":"2023-01-01T09:00:00Z","parentFolderId":"F1"},
+			{"id":"m2","subject":"Sunday roast?","receivedDateTime":"2026-11-22T09:00:00Z","parentFolderId":"INBOX"}]}`)
+	})}
+	got, err := b.Search(context.Background(), "", `sunday "roast\`, 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].RID != "m2" || got[0].Folder != "INBOX" || got[1].Folder != "F1" {
+		t.Fatalf("%+v", got)
+	}
+}

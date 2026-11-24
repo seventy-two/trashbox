@@ -310,6 +310,34 @@ func (b *Mailbox) Older(ctx context.Context, folder string, before time.Time, n 
 	return out, more, err
 }
 
+// Search looks through folder (All Mail, for Gmail) on the server for
+// messages containing every word of q, and returns the newest n.
+func (b *Mailbox) Search(ctx context.Context, folder, q string, n int) ([]mailbox.Found, error) {
+	words := strings.Fields(q)
+	if len(words) == 0 {
+		return nil, nil
+	}
+	var out []mailbox.Found
+	err := b.with(ctx, folder, func(c *imapclient.Client) error {
+		res, err := c.UIDSearch(&imap.SearchCriteria{Text: words}, nil).Wait()
+		if err != nil {
+			return err
+		}
+		uids := res.AllUIDs()
+		slices.Sort(uids) // UIDs rise with arrival: the newest are last
+		hs, err := fetchHeaders(c, uids[len(uids)-min(len(uids), n):])
+		if err != nil {
+			return err
+		}
+		slices.SortFunc(hs, func(a, b mailbox.Header) int { return b.Date.Compare(a.Date) })
+		for _, h := range hs {
+			out = append(out, mailbox.Found{Folder: folder, Header: h})
+		}
+		return nil
+	})
+	return out, err
+}
+
 // Raw fetches the message source with BODY.PEEK, so it stays unread.
 func (b *Mailbox) Raw(ctx context.Context, folder, rid string) ([]byte, error) {
 	uid, ok := parseUID(rid)

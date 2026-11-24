@@ -24,6 +24,7 @@ import (
 	"github.com/seventy-two/trashbox/engine/internal/gmail"
 	"github.com/seventy-two/trashbox/engine/internal/graph"
 	"github.com/seventy-two/trashbox/engine/internal/hook"
+	"github.com/seventy-two/trashbox/engine/internal/mailbox"
 	"github.com/seventy-two/trashbox/engine/internal/msauth"
 	"github.com/seventy-two/trashbox/engine/internal/store"
 	"github.com/seventy-two/trashbox/engine/internal/winui"
@@ -225,6 +226,33 @@ func spike(cmd string, args []string) error {
 		fmt.Printf("%s: %d in inbox, %d unread\n", a.Address, counts.Total, counts.Unread)
 		for _, m := range recent {
 			printMsg(m.Received, m.Read, m.From, m.Subject)
+		}
+		return nil
+
+	case "search-test":
+		// Times each account's server search; prints counts only.
+		q := strings.Join(fs.Args(), " ")
+		for _, a := range providers(st, cfg, log.New(os.Stderr, "", 0)) {
+			s, ok := a.Provider.(mailbox.Searcher)
+			if !ok {
+				continue
+			}
+			folder := ""
+			if fl, err := a.Provider.Folders(ctx); err == nil {
+				for _, f := range fl {
+					if f.Role == mailbox.RoleAll || (folder == "" && f.Role == mailbox.RoleInbox) {
+						folder = f.ID
+					}
+				}
+			}
+			start := time.Now()
+			found, err := s.Search(ctx, folder, q, 50)
+			oldest := ""
+			if len(found) > 0 {
+				oldest = found[len(found)-1].Date.Format("2006-01-02")
+			}
+			fmt.Printf("%-8s %2d found, oldest %s, %.1fs, err %v\n", a.Kind, len(found), oldest, time.Since(start).Seconds(), err)
+			a.Provider.Close()
 		}
 		return nil
 

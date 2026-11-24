@@ -50,6 +50,18 @@ func Open(path string) (*Cache, error) {
 		db.Close()
 		return nil, fmt.Errorf("cache schema: %w", err)
 	}
+	// found (added for search): 1 for a message known only from a search.
+	// Such messages open and show in results, but stay out of folder lists
+	// and paging, or a folder's older mail would be fetched from the wrong
+	// place.
+	var has int
+	db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name='found'`).Scan(&has)
+	if has == 0 {
+		if _, err := db.Exec(`ALTER TABLE messages ADD COLUMN found INT NOT NULL DEFAULT 0`); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("cache schema: %w", err)
+		}
+	}
 	return &Cache{db}, nil
 }
 
@@ -146,7 +158,7 @@ func (c *Cache) SetComplete(account, id string, complete bool) error {
 
 // Known returns the folder's cached messages in the window: RID → date.
 func (c *Cache) Known(account, folder string, since time.Time) (map[string]time.Time, error) {
-	rows, err := c.db.Query(`SELECT rid, date FROM messages WHERE account=? AND folder=? AND date>=?`, account, folder, since.Unix())
+	rows, err := c.db.Query(`SELECT rid, date FROM messages WHERE account=? AND folder=? AND date>=? AND found=0`, account, folder, since.Unix())
 	if err != nil {
 		return nil, err
 	}
@@ -168,7 +180,14 @@ const upsert = `INSERT INTO messages(account,folder,rid,date,from_name,from_addr
 	ON CONFLICT(account,folder,rid) DO UPDATE SET date=excluded.date, from_name=excluded.from_name,
 	from_addr=excluded.from_addr, to_text=excluded.to_text, subject=excluded.subject,
 	snippet=CASE WHEN excluded.snippet<>'' THEN excluded.snippet ELSE messages.snippet END,
-	seen=excluded.seen, flagged=excluded.flagged, attach=excluded.attach`
+	seen=excluded.seen, flagged=excluded.flagged, attach=excluded.attach, found=0`
+
+// upsertFound adds a search result, leaving a message already cached as it
+// is (bar its flags).
+const upsertFound = `INSERT INTO messages(account,folder,rid,date,from_name,from_addr,to_text,subject,snippet,seen,flagged,attach,found)
+	VALUES(?,?,?,?,?,?,?,?,?,?,?,?,1)
+	ON CONFLICT(account,folder,rid) DO UPDATE SET seen=excluded.seen, flagged=excluded.flagged,
+	snippet=CASE WHEN messages.snippet='' THEN excluded.snippet ELSE messages.snippet END`
 
 func put(tx *sql.Tx, account, folder string, h mailbox.Header) (id int64, inserted bool, err error) {
 	var existing int64
@@ -257,10 +276,63 @@ func (c *Cache) AddOlder(account, folder string, hs []mailbox.Header) error {
 	return tx.Commit()
 }
 
+// AddFound stores messages found by a server search.
+func (c *Cache) AddFound(account, folder string, hs []mailbox.Header) error {
+	tx, err := c.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, h := range hs {
+		if _, err := tx.Exec(upsertFound, account, folder, h.RID, h.Date.Unix(), h.FromName, h.FromAddr, h.To, h.Subject,
+			h.Snippet, h.Seen, h.Flagged, h.Attach); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// Search finds cached messages whose subject, sender, recipients or
+// snippet contain every word of q (case-insensitive), newest first. Junk
+// and trash are left out.
+func (c *Cache) Search(q string, limit int) ([]Message, error) {
+	words := strings.Fields(q)
+	if len(words) == 0 {
+		return []Message{}, nil
+	}
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	where := []string{`COALESCE(f.role,'') NOT IN ('junk','trash')`}
+	var args []any
+	for _, w := range words {
+		like := "%" + strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(strings.ToLower(w)) + "%"
+		where = append(where, `(lower(m.subject) LIKE ? ESCAPE '\' OR lower(m.from_name) LIKE ? ESCAPE '\' OR
+			lower(m.from_addr) LIKE ? ESCAPE '\' OR lower(m.to_text) LIKE ? ESCAPE '\' OR lower(m.snippet) LIKE ? ESCAPE '\')`)
+		args = append(args, like, like, like, like, like)
+	}
+	args = append(args, limit)
+	rows, err := c.db.Query(`SELECT `+msgCols+` FROM messages m LEFT JOIN folders f ON f.account=m.account AND f.id=m.folder
+		WHERE `+strings.Join(where, " AND ")+` ORDER BY m.date DESC, m.id DESC LIMIT ?`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Message{}
+	for rows.Next() {
+		m, err := scanMessage(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
 // Oldest returns the date of the folder's oldest cached message.
 func (c *Cache) Oldest(account, folder string) (time.Time, bool, error) {
 	var d sql.NullInt64
-	err := c.db.QueryRow(`SELECT MIN(date) FROM messages WHERE account=? AND folder=?`, account, folder).Scan(&d)
+	err := c.db.QueryRow(`SELECT MIN(date) FROM messages WHERE account=? AND folder=? AND found=0`, account, folder).Scan(&d)
 	if err != nil || !d.Valid {
 		return time.Time{}, false, err
 	}
@@ -309,7 +381,7 @@ func (c *Cache) List(q Query) ([]Message, error) {
 	if q.Limit <= 0 || q.Limit > 500 {
 		q.Limit = 100
 	}
-	var where []string
+	where := []string{`m.found=0`}
 	var args []any
 	from := `messages m`
 	if q.Unified {

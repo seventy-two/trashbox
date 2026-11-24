@@ -195,3 +195,27 @@ func TestReconnectsAfterDrop(t *testing.T) {
 		t.Fatalf("should reconnect: %v", err)
 	}
 }
+
+func TestSearch(t *testing.T) {
+	s := newServer(t)
+	now := time.Now().Truncate(time.Second)
+	s.add("INBOX", "Sunday roast", now.AddDate(-2, 0, 0))
+	s.add("INBOX", "Weekday lunch", now.AddDate(-1, 0, 0))
+	s.add("INBOX", "Another roast", now)
+	b := &Mailbox{Addr: s.addr, Insecure: true, User: user, Pass: pass}
+	defer b.Close()
+	got, err := b.Search(context.Background(), "INBOX", "roast", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Subject != "Another roast" || got[0].Folder != "INBOX" {
+		t.Fatalf("search %+v", got)
+	}
+	// Every word must match; the newest n win.
+	if got, _ := b.Search(context.Background(), "INBOX", "sunday roast", 10); len(got) != 1 {
+		t.Errorf("two words: %+v", got)
+	}
+	if got, _ := b.Search(context.Background(), "INBOX", "roast", 1); len(got) != 1 || got[0].Subject != "Another roast" {
+		t.Errorf("newest one: %+v", got)
+	}
+}

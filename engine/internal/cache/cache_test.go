@@ -145,3 +145,55 @@ func fmtS(s []string) string {
 	}
 	return out + "]"
 }
+
+func TestSearchAndFound(t *testing.T) {
+	c, err := Open(filepath.Join(t.TempDir(), "c.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SaveFolders("a", []mailbox.Folder{{ID: "IN", Role: mailbox.RoleInbox}, {ID: "JUNK", Role: mailbox.RoleJunk}})
+	now := time.Now().Truncate(time.Second)
+	since := now.Add(-24 * time.Hour)
+	c.Apply("a", "IN", since, mailbox.Delta{New: []mailbox.Header{
+		{RID: "1", Date: now, FromName: "Priya Shah", Subject: "Sunday roast?"},
+		{RID: "2", Date: now.Add(-time.Hour), FromName: "Shop", Subject: "50% off"},
+	}})
+	c.Apply("a", "JUNK", since, mailbox.Delta{New: []mailbox.Header{{RID: "9", Date: now, Subject: "Sunday prize"}}})
+
+	got, _ := c.Search("sunday ROAST", 10)
+	if len(got) != 1 || got[0].Subject != "Sunday roast?" {
+		t.Fatalf("search %v", got)
+	}
+	if got, _ := c.Search("sunday", 10); len(got) != 1 {
+		t.Errorf("junk should be left out: %v", got)
+	}
+	if got, _ := c.Search("50%", 10); len(got) != 1 || got[0].RID != "2" {
+		t.Errorf("%% taken literally: %v", got)
+	}
+	if got, _ := c.Search("5_%", 10); len(got) != 0 {
+		t.Errorf("_ taken literally: %v", got)
+	}
+
+	// An old message found on the server: in results, but not in the
+	// folder's list or its paging.
+	old := now.AddDate(-3, 0, 0)
+	if err := c.AddFound("a", "IN", []mailbox.Header{{RID: "old", Date: old, Subject: "Sunday roast 2023"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := c.Search("roast", 10); len(got) != 2 {
+		t.Errorf("found message missing from search: %v", got)
+	}
+	list, _ := c.List(Query{Account: "a", Folder: "IN"})
+	if len(list) != 2 {
+		t.Errorf("found message leaked into the folder list: %v", list)
+	}
+	if o, _, _ := c.Oldest("a", "IN"); o.Equal(old) {
+		t.Error("found message moved the folder's oldest")
+	}
+	// Paging later reaches it for real: it joins the list.
+	c.AddOlder("a", "IN", []mailbox.Header{{RID: "old", Date: old, Subject: "Sunday roast 2023"}})
+	if list, _ := c.List(Query{Account: "a", Folder: "IN"}); len(list) != 3 {
+		t.Errorf("paged-in message should show: %v", list)
+	}
+}

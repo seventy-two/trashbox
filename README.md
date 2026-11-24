@@ -33,6 +33,10 @@ and Gmail (IMAP).
 - **Attachments.** Attach files with the Attach button or by dropping them
   on the window (up to 25 MB a message; big Outlook ones go up in chunks).
   Click an attachment on a message to save it.
+- **Search.** Ctrl+F (or /) and type: every account and folder, matching
+  the subject, people and preview. What's cached shows at once; then each
+  account's server is searched too (Graph's `$search`, IMAP search of
+  Gmail's All Mail), so years-old mail turns up, account by account.
 - **A feed for a dashboard.** Optionally, the unread mail of the last two
   days is posted to a webhook whenever it changes
   (`trashbox-engine spike set-mail-hook`, URL on stdin), and
@@ -45,7 +49,7 @@ and Gmail (IMAP).
 | ![](docs/plain.png) | ![](docs/blocked.png) | ![](docs/code.png) |
 
 Work in progress: reading, replying, writing and attachments work.
-Archive, delete, search and forwarding are next.
+Archive, delete and forwarding are next.
 
 ## Accounts
 

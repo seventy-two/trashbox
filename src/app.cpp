@@ -305,7 +305,7 @@ bool App::InCaption(float x, float y) const {
 }
 
 bool App::Animating() const {
-    return listLoading_ || body_.loading || draft_.loading || draft_.sending || reader_->Loading() || (!steps_.empty() && step_ < steps_.size()) ||
+    return listLoading_ || body_.loading || draft_.loading || draft_.sending || searchDirty_ || !searchDone_ || reader_->Loading() || (!steps_.empty() && step_ < steps_.size()) ||
            (!note_.empty() && ImGui::GetTime() < noteUntil_);
 }
 
@@ -514,6 +514,41 @@ void App::OpenMessage(int64_t id) {
     select(id);
 }
 
+// ---------------------------------------------------------------- search
+
+void App::runSearch() {
+    searchDirty_ = false;
+    std::string q = searchText_;
+    q.erase(0, q.find_first_not_of(" \t"));
+    q.erase(q.find_last_not_of(" \t") + 1);
+    if (q.empty()) {
+        if (searching()) endSearch();
+        return;
+    }
+    if (q == searchQ_) return;
+    searchQ_ = q;
+    searchReq_ = nextReq_++;
+    searchDone_ = false;
+    searchFailed_.clear();
+    listReq_ = 0;  // a list reply still on its way is no longer wanted
+    listLoading_ = true;
+    listMore_ = false;
+    scrollTop_ = true;
+    request({{"t", "search"}, {"q", q}, {"req", searchReq_}});
+}
+
+// endSearch goes back to the folder that was showing.
+void App::endSearch() {
+    searchText_.clear();
+    searchQ_.clear();
+    searchDirty_ = false;
+    searchReq_ = 0;
+    searchDone_ = true;
+    list_.clear();
+    scrollTop_ = true;
+    loadList(false);
+}
+
 bool App::inView(const std::string& account, const std::string& folder) const {
     if (view_.unified) {
         for (const auto& a : accounts_)
@@ -593,9 +628,9 @@ void App::onEvent(const json& e) {
                                            int(num(f, "unread")), int(num(f, "total"))});
             }
         // The unified view depends on knowing each inbox.
-        if (view_.unified && list_.empty() && !listLoading_) listStale_ = true;
+        if (view_.unified && list_.empty() && !listLoading_ && !searching()) listStale_ = true;
     } else if (t == "changed") {
-        if (inView(str(e, "account"), str(e, "folder"))) listStale_ = true;
+        if (!searching() && inView(str(e, "account"), str(e, "folder"))) listStale_ = true;
     } else if (t == "list") {
         if (req != listReq_) return;
         listLoading_ = false;
@@ -653,6 +688,15 @@ void App::onEvent(const json& e) {
         discardDraft();
         note_ = "Sent to " + to;
         noteUntil_ = ImGui::GetTime() + 6;
+    } else if (t == "search") {
+        if (req != searchReq_) return;
+        listLoading_ = false;
+        searchDone_ = flag(e, "done");
+        list_.clear();
+        for (const auto& m : e["messages"]) list_.push_back(parseMsg(m));
+        listMore_ = false;
+        searchFailed_.clear();
+        if (auto it = e.find("failed"); it != e.end()) searchFailed_ = strings(*it);
     } else if (t == "saved") {
         std::wstring path = Widen(str(e, "path"));
         std::wstring dir = path.substr(0, path.size() - BaseName(path).size());
@@ -722,7 +766,8 @@ void App::Pump() {
         }
         if (key == VK_F5) request({{"t", "sync"}});
     }
-    if (listStale_ && !listLoading_) loadList(false);
+    if (listStale_ && !listLoading_ && !searching()) loadList(false);
+    if (searchDirty_ && ImGui::GetTime() - searchEdited_ > 0.45) runSearch();
     saveDraft(false);
 
     reader_->Tick(IsWindowVisible(hwnd_) && !IsIconic(hwnd_));
@@ -736,7 +781,7 @@ void App::Pump() {
 // "shot C:\\path.png", "mouse x y", "down", "up" (ImGui only), "new",
 // "reply", "replyall", "set to|cc|subject|body text" (body: put before the
 // quote), "attach C:\\file", "saveatt <index> C:\\path", "send", "discard",
-// "waitdraft", "quit".
+// "waitdraft", "search <q>", "waitsearch", "endsearch", "quit".
 void App::testStep() {
     if (step_ >= steps_.size()) return;
     double now = ImGui::GetTime();
@@ -783,6 +828,13 @@ void App::testStep() {
         } else {
             io.AddMouseButtonEvent(0, cmd == "down");
         }
+    } else if (cmd == "search") {
+        std::getline(ss >> std::ws, searchText_);
+        runSearch();
+    } else if (cmd == "waitsearch") {
+        if (!searchDone_ || listLoading_) return;
+    } else if (cmd == "endsearch") {
+        endSearch();
     } else if (cmd == "new") {
         newMessage();
     } else if (cmd == "reply" || cmd == "replyall") {
@@ -888,11 +940,16 @@ void App::Frame() {
                 if (list_[n].id == selected_) i = int(n);
             int next = std::clamp(i < 0 ? 0 : i + d, 0, int(list_.size()) - 1);
             select(list_[size_t(next)].id);
-            if (next >= int(list_.size()) - 5 && listMore_ && !listLoading_) loadList(true);
+            if (next >= int(list_.size()) - 5 && listMore_ && !listLoading_ && !searching()) loadList(true);
         };
         if (ImGui::IsKeyPressed(ImGuiKey_DownArrow) || ImGui::IsKeyPressed(ImGuiKey_J)) move(1);
         if (ImGui::IsKeyPressed(ImGuiKey_UpArrow) || ImGui::IsKeyPressed(ImGuiKey_K)) move(-1);
-        if (ImGui::IsKeyPressed(ImGuiKey_Escape) && !draft_.shown) select(0);
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape) && !draft_.shown) {
+            if (selected_ == 0 && searching()) endSearch();
+            else select(0);
+        }
+        if ((ImGui::IsKeyPressed(ImGuiKey_F, false) && ImGui::GetIO().KeyCtrl) || ImGui::IsKeyPressed(ImGuiKey_Slash, false))
+            focusSearch_ = true;
         // Writing: N (or Ctrl+N) new, R reply, A or Ctrl+Shift+R reply all.
         ImGuiIO& io = ImGui::GetIO();
         if (ImGui::IsKeyPressed(ImGuiKey_N, false) && !io.KeyAlt) newMessage();
@@ -1084,6 +1141,10 @@ void App::drawSidebar(float x, float y, float w, float h) {
     ImGui::Dummy(ImVec2(0, 6 * k));
 
     auto changeView = [&](View v) {
+        if (searching()) {
+            endSearch();
+            if (v == view_) return;
+        }
         if (v == view_) return;
         view_ = v;
         list_.clear();
@@ -1203,9 +1264,39 @@ void App::drawList(float x, float y, float w, float h) {
     ImDrawList* bg = ImGui::GetWindowDrawList();
     bg->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + h), U32(p.bg));
 
+    // The search box, top right: every account, every folder.
+    float boxW = std::min(300 * k, w * 0.45f);
+    float boxX = x + w - boxW - 12 * k;
+    {
+        ImGui::SetCursorScreenPos(ImVec2(boxX, y + 5 * k));
+        ImGui::PushFont(fonts_.regular, kSmall + 1);
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8 * k, 4 * k));
+        if (focusSearch_) {
+            ImGui::ActivateItemByID(ImGui::GetID("##search"));
+            focusSearch_ = false;
+        }
+        TextCb cb{&searchText_, nullptr};
+        ImGui::SetNextItemWidth(boxW);
+        // Esc empties the box (then leaves it); Enter searches at once.
+        bool enter = ImGui::InputTextWithHint("##search", "Search all mail  (Ctrl+F)", searchText_.data(),
+                                              searchText_.capacity() + 1,
+                                              ImGuiInputTextFlags_CallbackResize | ImGuiInputTextFlags_EscapeClearsAll |
+                                                  ImGuiInputTextFlags_EnterReturnsTrue,
+                                              textCallback, &cb);
+        if (ImGui::IsItemEdited()) {
+            searchDirty_ = true;
+            searchEdited_ = ImGui::GetTime();
+            if (searchText_.empty() && searching()) endSearch();
+        }
+        if (enter) runSearch();
+        ImGui::PopStyleVar();
+        ImGui::PopFont();
+    }
+
     // Heading: what's shown.
     std::string title = "All inboxes";
-    if (!view_.unified)
+    if (searching()) title = "Search";
+    else if (!view_.unified)
         for (const auto& a : accounts_)
             if (a.id == view_.account)
                 for (const auto& f : a.folders)
@@ -1215,18 +1306,30 @@ void App::drawList(float x, float y, float w, float h) {
     ImGui::PushFont(fonts_.semibold, kBody + 1);
     ImGui::TextUnformatted(title.c_str());
     ImGui::PopFont();
-    if (!view_.unified) {
+    std::string sub;
+    if (searching()) {
+        if (!searchDone_) sub = "Searching the servers\xE2\x80\xA6";
+        else if (!searchFailed_.empty()) sub = "Couldn't search " + std::to_string(searchFailed_.size()) + " account(s)";
+        else sub = std::to_string(list_.size()) + (list_.size() == 200 ? "+ found" : " found");
+    } else if (!view_.unified) sub = view_.account;
+    if (!sub.empty()) {
         ImGui::SameLine(0, 8 * k);
         ImGui::PushFont(fonts_.regular, kSmall + 0.5f);
         ImGui::SetCursorPosY(y + 10 * k);
         ImVec2 at = ImGui::GetCursorScreenPos();
-        ellipsis(ImGui::GetWindowDrawList(), at, x + w - 14 * k, view_.account, U32(p.muted));
+        ellipsis(ImGui::GetWindowDrawList(), at, boxX - 10 * k, sub,
+                 U32(!searchFailed_.empty() && searching() ? p.bad : p.muted));
         ImGui::PopFont();
+        if (searching() && !searchFailed_.empty() && ImGui::IsMouseHoveringRect(at, ImVec2(boxX, at.y + 20 * k))) {
+            std::string tip;
+            for (const auto& f : searchFailed_) tip += f + "\n";
+            ImGui::SetTooltip("%s", tip.c_str());
+        }
     }
     float cols = 36 * k, head = cols + 24 * k;
     {
         float avail = w - 1 - ImGui::GetStyle().ScrollbarSize;
-        float markW = (view_.unified ? 14 * k : 0) + 46 * k;
+        float markW = (view_.unified || searching() ? 14 * k : 0) + 46 * k;
         float dateW = 118 * k;
         float fromW = std::clamp(avail * 0.28f, 120 * k, 260 * k);
         bg->AddRectFilled(ImVec2(x, y + cols), ImVec2(x + w - 1, y + head), U32(p.sidebar));
@@ -1249,7 +1352,7 @@ void App::drawList(float x, float y, float w, float h) {
     const float rowH = 27 * k;
     int64_t now = int64_t(std::time(nullptr));
     float avail = ImGui::GetContentRegionAvail().x;
-    float markW = (view_.unified ? 14 * k : 0) + 46 * k;
+    float markW = (view_.unified || searching() ? 14 * k : 0) + 46 * k;
     float dateW = 118 * k;
     float fromW = std::clamp(avail * 0.28f, 120 * k, 260 * k);
     float subjX = markW, fromX = avail - dateW - fromW, dateX = avail - dateW;
@@ -1294,7 +1397,7 @@ void App::drawList(float x, float y, float w, float h) {
             ImGui::PushFont(fonts_.regular, kBody);
             float ty = pos.y + (rowH - ImGui::GetFontSize()) / 2;
             float mx = pos.x + 8 * k;
-            if (view_.unified) {
+            if (view_.unified || searching()) {
                 dl->AddCircleFilled(ImVec2(mx + 4 * k, pos.y + rowH / 2), 3.5f * k, U32(accountColour(accountIndex(m.account))));
                 mx += 14 * k;
             }
@@ -1319,12 +1422,13 @@ void App::drawList(float x, float y, float w, float h) {
         }
     }
     clip.End();
-    if (nearEnd && listMore_ && !listLoading_ && !list_.empty()) loadList(true);
+    if (nearEnd && listMore_ && !listLoading_ && !list_.empty() && !searching()) loadList(true);
 
     if (list_.empty()) {
         ImGui::SetCursorPos(ImVec2(16 * k, 16 * k));
         ImGui::PushFont(fonts_.regular, kSmall + 0.5f);
-        ImGui::TextColored(p.muted, "%s", listLoading_ ? "Loading\xE2\x80\xA6" : "Nothing here.");
+        ImGui::TextColored(p.muted, "%s", listLoading_ || (searching() && !searchDone_) ? (searching() ? "Searching\xE2\x80\xA6" : "Loading\xE2\x80\xA6")
+                                          : searching() ? "Nothing found." : "Nothing here.");
         ImGui::PopFont();
     } else if (listLoading_ && listMore_) {
         ImGui::SetCursorPosX(16 * k);

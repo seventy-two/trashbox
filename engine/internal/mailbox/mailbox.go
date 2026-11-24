@@ -79,5 +79,18 @@ type Provider interface {
 	Close() error
 }
 
+// Found is a message a server search turned up, and the folder it's in.
+type Found struct {
+	Folder string
+	Header
+}
+
+// Searcher is a Provider that can search the whole account on the server.
+// folder is where to look for providers that search one folder at a time
+// (IMAP: Gmail's All Mail); others ignore it. Results come newest first.
+type Searcher interface {
+	Search(ctx context.Context, folder, q string, n int) ([]Found, error)
+}
+
 // ErrNoPush means the provider can't tell us about changes: poll instead.
 var ErrNoPush = errors.New("no push for this account type")
