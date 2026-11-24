@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/seventy-two/trashbox/engine/internal/cache"
+	"github.com/seventy-two/trashbox/engine/internal/demo"
 	"github.com/seventy-two/trashbox/engine/internal/engine"
 
 	"github.com/seventy-two/trashbox/engine/internal/gmail"
@@ -26,6 +27,7 @@ import (
 )
 
 const usage = `trashbox-engine                 run for the window (JSON lines on stdin/stdout)
+trashbox-engine -demo           the same with made-up accounts (set TRASHBOX_DATA to a test folder)
 trashbox-engine spike <command> [flags]
 
   accounts                        list accounts
@@ -39,8 +41,8 @@ trashbox-engine spike <command> [flags]
 `
 
 func main() {
-	if len(os.Args) == 1 {
-		if err := serve(); err != nil {
+	if len(os.Args) == 1 || (len(os.Args) == 2 && os.Args[1] == "-demo") {
+		if err := serve(len(os.Args) == 2); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
@@ -57,7 +59,7 @@ func main() {
 }
 
 // serve runs the engine for the window until stdin closes or "quit".
-func serve() error {
+func serve(demoMode bool) error {
 	st, err := store.Open()
 	if err != nil {
 		return err
@@ -82,7 +84,11 @@ func serve() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	e := engine.New(c, filepath.Join(st.Dir, "view"), os.Stdout, logger, engine.DefaultSettings, providers(st, cfg, logger))
+	accounts := providers(st, cfg, logger)
+	if demoMode {
+		accounts = demo.Accounts()
+	}
+	e := engine.New(c, filepath.Join(st.Dir, "view"), os.Stdout, logger, engine.DefaultSettings, accounts)
 	e.Run(ctx, os.Stdin)
 	logger.Printf("stopped")
 	return nil
