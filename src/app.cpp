@@ -959,7 +959,6 @@ void App::drawList(float x, float y, float w, float h) {
             if (sel) dl->AddRectFilled(pos, ImVec2(pos.x + rw, pos.y + rowH), U32(p.selected));
             else if (hov) dl->AddRectFilled(pos, ImVec2(pos.x + rw, pos.y + rowH), U32(p.hover));
             else if (i % 2) dl->AddRectFilled(pos, ImVec2(pos.x + rw, pos.y + rowH), U32(p.sidebar, 0.45f));
-            if (!m.seen) dl->AddRectFilled(ImVec2(pos.x, pos.y + 5 * k), ImVec2(pos.x + 2 * k, pos.y + rowH - 5 * k), U32(p.accent));
 
             ImFont* face = m.seen ? fonts_.regular : fonts_.bold;
             ImU32 strong = U32(m.seen ? p.text : p.heading);
