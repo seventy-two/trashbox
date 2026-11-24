@@ -103,6 +103,7 @@ func build(now time.Time, inbox []seed, older []seed) *Provider {
 		{ID: "sent", Name: "Sent", Role: mailbox.RoleSent},
 		{ID: "archive", Name: "Archive", Role: mailbox.RoleArchive},
 		{ID: "receipts", Name: "Receipts", Parent: "archive"},
+		{ID: "junk", Name: "Junk", Role: mailbox.RoleJunk},
 		{ID: "trash", Name: "Deleted", Role: mailbox.RoleTrash},
 	}
 	n := 0
@@ -122,6 +123,7 @@ func build(now time.Time, inbox []seed, older []seed) *Provider {
 		add("inbox", s)
 	}
 	add("sent", seed{ago: 30 * time.Minute, name: "Me", addr: "me@example.com", subject: "Re: Sunday roast?", seen: true, text: "Yes! 1pm is perfect."})
+	add("junk", seed{ago: 2 * time.Hour, name: "Prize Desk", addr: "winner@prizes.example", subject: "You've won (again)", text: "Claim now!"})
 	add("receipts", seed{ago: 40 * 24 * time.Hour, name: "Kettle & Bean", addr: "orders@kettlebean.example", subject: "Order KB-40017", seen: true, html: receipt})
 	p.recount()
 	return p

@@ -26,7 +26,7 @@ constexpr const char* Mail = "\xEE\x9C\x95";       // U+E715
 constexpr const char* Send = "\xEE\x9C\xA4";       // U+E724
 constexpr const char* Draft = "\xEE\x9C\x8F";      // U+E70F
 constexpr const char* Archive = "\xEE\x9E\xB8";    // U+E7B8
-constexpr const char* Junk = "\xEE\x9C\xB3";       // U+E733
+constexpr const char* Junk = "\xEE\x9E\xBA";       // U+E7BA (Warning)
 constexpr const char* Trash = "\xEE\x9D\x8D";      // U+E74D
 constexpr const char* Folder = "\xEE\xA2\xB7";     // U+E8B7
 constexpr const char* Flag = "\xEE\x9F\x81";       // U+E7C1
@@ -128,6 +128,41 @@ const Folder* Account::Inbox() const {
     return nullptr;
 }
 
+// sortAccounts puts the accounts in the saved order; new ones go last.
+void App::sortAccounts() {
+    auto rank = [&](const std::string& id) {
+        auto it = std::find(cfg_.order.begin(), cfg_.order.end(), id);
+        return it == cfg_.order.end() ? 1000 : int(it - cfg_.order.begin());
+    };
+    std::stable_sort(accounts_.begin(), accounts_.end(),
+                     [&](const Account& a, const Account& b) { return rank(a.id) < rank(b.id); });
+}
+
+void App::moveAccount(size_t i, int d) {
+    size_t j = size_t(int(i) + d);
+    if (j >= accounts_.size()) return;
+    std::swap(accounts_[i], accounts_[j]);
+    cfg_.order.clear();
+    for (const auto& a : accounts_) cfg_.order.push_back(a.id);
+    saveConfig();
+    listStale_ = true;  // the unified list's account colours follow the order
+}
+
+bool App::folderShown(const Account& a, const Folder& f) const {
+    auto it = cfg_.shown.find(a.id);
+    if (it == cfg_.shown.end()) return f.role == "inbox" || f.role == "junk";
+    return it->second.count(f.id) > 0;
+}
+
+void App::setFolderShown(const Account& a, const Folder& f, bool on) {
+    if (!cfg_.shown.count(a.id))  // start from the defaults
+        for (const auto& x : a.folders)
+            if (folderShown(a, x)) cfg_.shown[a.id].insert(x.id);
+    if (on) cfg_.shown[a.id].insert(f.id);
+    else cfg_.shown[a.id].erase(f.id);
+    saveConfig();
+}
+
 App::App(HWND hwnd, std::function<void()> wake) : hwnd_(hwnd), wake_(std::move(wake)) {
     dataDir_ = dataDir();
     CreateDirectoryW(dataDir_.c_str(), nullptr);
@@ -166,13 +201,24 @@ void App::loadConfig() {
         cfg_.y = int(num(j, "y"));
         cfg_.w = int(num(j, "w"));
         cfg_.h = int(num(j, "h"));
+        if (auto it = j.find("order"); it != j.end() && it->is_array())
+            for (const auto& a : *it)
+                if (a.is_string()) cfg_.order.push_back(a.get<std::string>());
+        if (auto it = j.find("shown"); it != j.end() && it->is_object())
+            for (auto& [acc, ids] : it->items())
+                if (ids.is_array())
+                    for (const auto& id : ids)
+                        if (id.is_string()) cfg_.shown[acc].insert(id.get<std::string>());
     } catch (...) {
     }
 }
 
 void App::saveConfig() {
     if (demo_) return;
-    json j = {{"placed", cfg_.placed}, {"x", cfg_.x}, {"y", cfg_.y}, {"w", cfg_.w}, {"h", cfg_.h}};
+    json j = {{"placed", cfg_.placed}, {"x", cfg_.x}, {"y", cfg_.y}, {"w", cfg_.w}, {"h", cfg_.h}, {"order", cfg_.order}};
+    json shown = json::object();
+    for (const auto& [acc, ids] : cfg_.shown) shown[acc] = std::vector<std::string>(ids.begin(), ids.end());
+    j["shown"] = shown;
     std::ofstream(dataDir_ + L"\\window.json") << j.dump(2);
 }
 
@@ -183,7 +229,11 @@ bool App::Place(RECT& r) const {
 }
 
 void App::SavePlace(const RECT& r) {
-    cfg_ = {true, r.left, r.top, r.right - r.left, r.bottom - r.top};
+    cfg_.placed = true;
+    cfg_.x = r.left;
+    cfg_.y = r.top;
+    cfg_.w = r.right - r.left;
+    cfg_.h = r.bottom - r.top;
     saveConfig();
 }
 
@@ -334,6 +384,7 @@ void App::onEvent(const json& e) {
             request({{"t", "folders"}, {"account", next.back().id}});
         }
         accounts_ = std::move(next);
+        sortAccounts();
     } else if (t == "account") {
         const json& a = e["account"];
         for (auto& acc : accounts_)
@@ -560,7 +611,7 @@ void App::drawTitle(float width) {
     barMax_ = ImVec2(width, h);
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddRectFilled(ImVec2(0, 0), ImVec2(width, h), U32(p.rail));
-    ImGui::SetCursorPos(ImVec2(14 * k, 11 * k));
+    ImGui::SetCursorPos(ImVec2(14 * k, 12 * k));
     ImGui::PushFont(fonts_.bold, 12);
     ImGui::TextColored(p.accent, "trashbox");
     ImGui::PopFont();
@@ -587,16 +638,36 @@ void App::drawTitle(float width) {
     } else if (syncing) ImGui::TextColored(p.muted, "Checking %d account%s\xE2\x80\xA6", syncing, syncing == 1 ? "" : "s");
     ImGui::PopFont();
 
-    float bx = width - 4 * 40 * k;
-    ImGui::SetCursorPos(ImVec2(bx, 3 * k));
-    if (iconButton(icon::Refresh, "Check for new mail (F5)", 40)) request({{"t", "sync"}});
-    ImGui::SameLine(0, 0);
-    if (iconButton(icon::Minimise, "", 40)) ::ShowWindow(hwnd_, SW_MINIMIZE);
-    ImGui::SameLine(0, 0);
+    // Full-height buttons, glyphs centred, like Windows' own.
+    float bw = 46 * k;
+    float bx = width - 4 * bw;
+    if (titleButton(icon::Refresh, "Check for new mail (F5)", bx, bw, h)) request({{"t", "sync"}});
+    if (titleButton(icon::Minimise, "", bx + bw, bw, h)) ::ShowWindow(hwnd_, SW_MINIMIZE);
     bool zoomed = IsZoomed(hwnd_);
-    if (iconButton(zoomed ? icon::Restore : icon::Maximise, "", 40)) ::ShowWindow(hwnd_, zoomed ? SW_RESTORE : SW_MAXIMIZE);
-    ImGui::SameLine(0, 0);
-    if (iconButton(icon::Close, "", 40, true)) PostMessageW(hwnd_, WM_CLOSE, 0, 0);
+    if (titleButton(zoomed ? icon::Restore : icon::Maximise, "", bx + 2 * bw, bw, h))
+        ::ShowWindow(hwnd_, zoomed ? SW_RESTORE : SW_MAXIMIZE);
+    if (titleButton(icon::Close, "", bx + 3 * bw, bw, h, true)) PostMessageW(hwnd_, WM_CLOSE, 0, 0);
+}
+
+bool App::titleButton(const char* glyph, const char* tip, float x, float w, float h, bool danger) {
+    const Palette& p = Colours();
+    ImGui::SetCursorPos(ImVec2(x, 0));
+    ImGui::PushID(glyph);
+    bool pressed = ImGui::InvisibleButton("##tb", ImVec2(w, h));
+    bool hov = ImGui::IsItemHovered(), held = ImGui::IsItemActive();
+    ImGui::PopID();
+    ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+    hot_.push_back({a, b});
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    if (hov || held) dl->AddRectFilled(a, b, danger ? U32(Hex(0xC42B1C)) : U32(held ? p.border : p.hover));
+    ImGui::PushFont(fonts_.regular, 10);
+    ImVec2 ts = ImGui::CalcTextSize(glyph);
+    // Centre on the glyph's box, not the font's line: icon glyphs sit low.
+    dl->AddText(ImVec2(a.x + (w - ts.x) / 2, a.y + (h - ts.y) / 2 - 1 * scale_), U32(hov && danger ? p.heading : p.muted),
+                glyph);
+    ImGui::PopFont();
+    if (tip && *tip && hov && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) ImGui::SetTooltip("%s", tip);
+    return pressed;
 }
 
 bool App::folderRow(const char* label, int unread, bool selected, float indent, bool strongCount) {
@@ -604,7 +675,7 @@ bool App::folderRow(const char* label, int unread, bool selected, float indent, 
     const float k = scale_;
     ImVec2 pos = ImGui::GetCursorScreenPos();
     float w = ImGui::GetContentRegionAvail().x;
-    float h = 28 * k;
+    float h = 26 * k;
     ImGui::PushID(label);
     bool clicked = ImGui::InvisibleButton("##row", ImVec2(w, h));
     bool hovered = ImGui::IsItemHovered();
@@ -631,7 +702,7 @@ void App::drawSidebar(float x, float y, float w, float h) {
     bg->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + h), U32(p.sidebar));
     ImGui::SetCursorPos(ImVec2(x, y));
     ImGui::BeginChild("##sidebar", ImVec2(w, h), 0, ImGuiWindowFlags_NoScrollbar);
-    ImGui::Dummy(ImVec2(0, 8 * k));
+    ImGui::Dummy(ImVec2(0, 6 * k));
 
     auto changeView = [&](View v) {
         if (v == view_) return;
@@ -647,16 +718,36 @@ void App::drawSidebar(float x, float y, float w, float h) {
     std::string all = std::string(icon::Mail) + "  All inboxes";
     if (folderRow(all.c_str(), Unread(), view_.unified, 0, true)) changeView(View{});
     ImGui::PopFont();
-    ImGui::Dummy(ImVec2(0, 6 * k));
+    ImGui::Dummy(ImVec2(0, 4 * k));
 
     for (size_t ai = 0; ai < accounts_.size(); ai++) {
         Account& a = accounts_[ai];
-        ImGui::PushID(int(ai));
-        // Account header: its colour, the address, and its state.
+        ImGui::PushID(a.id.c_str());
+        // Account header: its colour, the address, and its state. Right-click
+        // to move it or pick which folders show.
         ImVec2 pos = ImGui::GetCursorScreenPos();
-        float rowH = 26 * k;
+        float rowH = 24 * k;
         if (ImGui::InvisibleButton("##acct", ImVec2(w, rowH))) a.collapsed = !a.collapsed;
         bool hov = ImGui::IsItemHovered();
+        if (ImGui::BeginPopupContextItem("##acctmenu")) {
+            if (ImGui::MenuItem("Move up", nullptr, false, ai > 0)) moveAccount(ai, -1);
+            if (ImGui::MenuItem("Move down", nullptr, false, ai + 1 < accounts_.size())) moveAccount(ai, 1);
+            ImGui::Separator();
+            ImGui::TextDisabled("Folders to show");
+            ImGui::PushItemFlag(ImGuiItemFlags_AutoClosePopups, false);
+            std::function<void(const std::string&, int)> items = [&](const std::string& parent, int depth) {
+                for (const auto& f : a.folders) {
+                    if (f.parent != parent) continue;
+                    bool on = folderShown(a, f);
+                    std::string label = std::string(size_t(depth) * 4, ' ') + f.name + "##" + f.id;
+                    if (ImGui::MenuItem(label.c_str(), nullptr, on)) setFolderShown(a, f, !on);
+                    if (depth < 6) items(f.id, depth + 1);
+                }
+            };
+            items("", 0);
+            ImGui::PopItemFlag();
+            ImGui::EndPopup();
+        }
         ImDrawList* dl = ImGui::GetWindowDrawList();
         ImGui::PushFont(fonts_.regular, kSmall);
         float ty = pos.y + (rowH - ImGui::GetFontSize()) / 2;
@@ -668,10 +759,26 @@ void App::drawSidebar(float x, float y, float w, float h) {
         if (hov && a.status == "error") ImGui::SetTooltip("%s", a.error.c_str());
 
         if (!a.collapsed) {
-            // Inbox and the special folders first, then the rest in the
-            // server's order with children under their parents.
+            // Only the folders ticked for this account: inbox and the special
+            // folders first, then the rest in the server's order. A shown
+            // folder whose parent is hidden sits at the top level.
+            auto shownParent = [&](const Folder& f) {
+                std::string parent = f.parent;
+                for (int guard = 0; !parent.empty() && guard < 10; guard++) {
+                    const Folder* pf = nullptr;
+                    for (const auto& x2 : a.folders)
+                        if (x2.id == parent) pf = &x2;
+                    if (!pf) return std::string();
+                    if (folderShown(a, *pf)) return parent;
+                    parent = pf->parent;
+                }
+                return std::string();
+            };
             std::vector<const Folder*> special, others;
-            for (const auto& f : a.folders) (f.role.empty() ? others : special).push_back(&f);
+            for (const auto& f : a.folders) {
+                if (!folderShown(a, f)) continue;
+                (f.role.empty() || !shownParent(f).empty() ? others : special).push_back(&f);
+            }
             std::stable_sort(special.begin(), special.end(),
                              [](const Folder* l, const Folder* r) { return roleRank(l->role) < roleRank(r->role); });
             auto drawFolder = [&](const Folder& f, int depth) {
@@ -682,24 +789,26 @@ void App::drawSidebar(float x, float y, float w, float h) {
                 ImGui::PushID(f.id.c_str());
                 if (folderRow(label.c_str(), f.unread, !view_.unified && view_ == v, (14 + 14 * depth) * k, strong))
                     changeView(v);
+                if (ImGui::BeginPopupContextItem("##foldermenu")) {
+                    if (ImGui::MenuItem("Hide this folder")) setFolderShown(a, f, false);
+                    ImGui::EndPopup();
+                }
                 ImGui::PopID();
             };
             std::function<void(const std::string&, int)> tree = [&](const std::string& parent, int depth) {
                 for (const Folder* f : others)
-                    if (f->parent == parent) {
+                    if (shownParent(*f) == parent) {
                         drawFolder(*f, depth);
                         if (depth < 6) tree(f->id, depth + 1);
                     }
             };
-            // Special folders with their children (e.g. Archive/Receipts)
-            // right under them, then the rest.
             for (const Folder* f : special) {
                 drawFolder(*f, 0);
                 tree(f->id, 1);
             }
             tree("", 0);
         }
-        ImGui::Dummy(ImVec2(0, 6 * k));
+        ImGui::Dummy(ImVec2(0, 4 * k));
         ImGui::PopID();
     }
     if (accounts_.empty() && engineError_.empty()) {
@@ -723,17 +832,21 @@ void App::drawList(float x, float y, float w, float h) {
             if (a.id == view_.account)
                 for (const auto& f : a.folders)
                     if (f.id == view_.folder) title = f.name;
-    ImGui::SetCursorPos(ImVec2(x + 16 * k, y + 12 * k));
-    ImGui::PushFont(fonts_.semibold, kH3);
+    // One line: what's shown, and whose it is.
+    ImGui::SetCursorPos(ImVec2(x + 14 * k, y + 9 * k));
+    ImGui::PushFont(fonts_.semibold, kBody);
     ImGui::TextUnformatted(title.c_str());
     ImGui::PopFont();
     if (!view_.unified) {
-        ImGui::SetCursorPos(ImVec2(x + 16 * k, y + 34 * k));
+        ImGui::SameLine(0, 8 * k);
         ImGui::PushFont(fonts_.regular, kSmall);
-        ImGui::TextColored(p.muted, "%s", view_.account.c_str());
+        ImGui::SetCursorPosY(y + 10 * k);
+        ImVec2 at = ImGui::GetCursorScreenPos();
+        ellipsis(ImGui::GetWindowDrawList(), at, x + w - 14 * k, view_.account, U32(p.muted));
         ImGui::PopFont();
     }
-    float head = 58 * k;
+    float head = 34 * k;
+    bg->AddLine(ImVec2(x, y + head - 1), ImVec2(x + w - 1, y + head - 1), U32(p.border, 0.6f));
     ImGui::SetCursorPos(ImVec2(x, y + head));
     ImGui::BeginChild("##list", ImVec2(w - 1, h - head), 0);
     if (scrollTop_) {
@@ -741,7 +854,8 @@ void App::drawList(float x, float y, float w, float h) {
         scrollTop_ = false;
     }
 
-    const float rowH = 72 * k;
+    // Two lines a message: sender and date; subject with the preview after it.
+    const float rowH = 46 * k;
     int64_t now = int64_t(std::time(nullptr));
     ImGuiListClipper clip;
     clip.Begin(int(list_.size()), rowH);
@@ -780,40 +894,43 @@ void App::drawList(float x, float y, float w, float h) {
             bool sel = m.id == selected_;
             if (sel) dl->AddRectFilled(pos, ImVec2(pos.x + rw, pos.y + rowH), U32(p.selected));
             else if (hov) dl->AddRectFilled(pos, ImVec2(pos.x + rw, pos.y + rowH), U32(p.hover));
-            if (!m.seen) dl->AddRectFilled(pos, ImVec2(pos.x + 3 * k, pos.y + rowH), U32(p.accent));
-            dl->AddLine(ImVec2(pos.x + 14 * k, pos.y + rowH - 1), ImVec2(pos.x + rw, pos.y + rowH - 1), U32(p.border, 0.5f));
+            if (!m.seen) dl->AddRectFilled(ImVec2(pos.x, pos.y + 8 * k), ImVec2(pos.x + 2 * k, pos.y + rowH - 8 * k), U32(p.accent));
+            dl->AddLine(ImVec2(pos.x + 12 * k, pos.y + rowH - 1), ImVec2(pos.x + rw, pos.y + rowH - 1), U32(p.border, 0.4f));
 
-            float lx = pos.x + 16 * k, rx = pos.x + rw - 14 * k;
-            // Line 1: sender, date.
+            float lx = pos.x + 12 * k, rx = pos.x + rw - 12 * k;
+            float y1 = pos.y + 6 * k, y2 = pos.y + 25 * k;
+            // Line 1: account dot, sender, date.
             std::string date = ListDate(m.date, now);
             ImGui::PushFont(fonts_.regular, kSmall);
             float dw = ImGui::CalcTextSize(date.c_str()).x;
-            dl->AddText(ImVec2(rx - dw, pos.y + 11 * k), U32(m.seen ? p.muted : p.accent), date.c_str());
+            dl->AddText(ImVec2(rx - dw, y1 + 1 * k), U32(m.seen ? p.muted : p.accent), date.c_str());
             ImGui::PopFont();
             float sx = lx;
             if (view_.unified) {
-                dl->AddCircleFilled(ImVec2(sx + 3 * k, pos.y + 19 * k), 3.5f * k, U32(accountColour(accountIndex(m.account))));
-                sx += 12 * k;
+                dl->AddCircleFilled(ImVec2(sx + 3 * k, y1 + 9 * k), 3 * k, U32(accountColour(accountIndex(m.account))));
+                sx += 11 * k;
             }
-            ImGui::PushFont(m.seen ? fonts_.regular : fonts_.bold, kBody);
+            ImGui::PushFont(m.seen ? fonts_.regular : fonts_.bold, kSmall + 1.0f);
             std::string from = m.fromName.empty() ? m.fromAddr : m.fromName;
-            ellipsis(dl, ImVec2(sx, pos.y + 9 * k), rx - dw - 10 * k, oneLine(from), U32(m.seen ? p.text : p.heading));
+            ellipsis(dl, ImVec2(sx, y1), rx - dw - 10 * k, oneLine(from), U32(m.seen ? p.text : p.heading));
             ImGui::PopFont();
-            // Line 2: subject, with attachment and flag marks on the right.
-            ImGui::PushFont(fonts_.regular, kSmall + 0.5f);
+            // Line 2: subject, then the preview in grey; marks on the right.
+            ImGui::PushFont(fonts_.regular, kSmall);
             float marks = 0;
             if (m.flagged) {
-                marks += 18 * k;
-                dl->AddText(ImVec2(rx - marks + 4 * k, pos.y + 30 * k), U32(p.bad), icon::Flag);
+                marks += 16 * k;
+                dl->AddText(ImVec2(rx - marks + 4 * k, y2), U32(p.bad), icon::Flag);
             }
             if (m.attach) {
-                marks += 18 * k;
-                dl->AddText(ImVec2(rx - marks + 4 * k, pos.y + 30 * k), U32(p.muted), icon::Attach);
+                marks += 16 * k;
+                dl->AddText(ImVec2(rx - marks + 4 * k, y2), U32(p.muted), icon::Attach);
             }
+            float maxX = rx - marks - 4 * k;
             std::string subject = m.subject.empty() ? "(no subject)" : oneLine(m.subject);
-            ellipsis(dl, ImVec2(lx, pos.y + 30 * k), rx - marks - 4 * k, subject, U32(m.seen ? p.text : p.heading));
-            // Line 3: preview.
-            ellipsis(dl, ImVec2(lx, pos.y + 49 * k), rx, oneLine(m.snippet), U32(p.muted));
+            float subW = ImGui::CalcTextSize(subject.c_str()).x;
+            ellipsis(dl, ImVec2(lx, y2), maxX, subject, U32(m.seen ? p.muted : p.text));
+            if (!m.snippet.empty() && lx + subW + 30 * k < maxX)
+                ellipsis(dl, ImVec2(lx + subW + 8 * k, y2), maxX, oneLine(m.snippet), U32(p.muted, 0.6f));
             ImGui::PopFont();
         }
     }

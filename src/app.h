@@ -9,6 +9,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -100,6 +101,7 @@ private:
     void drawList(float x, float y, float w, float h);
     void drawReading(float x, float y, float w, float h);
     bool iconButton(const char* glyph, const char* tip, float size = 30, bool danger = false);
+    bool titleButton(const char* glyph, const char* tip, float x, float w, float h, bool danger = false);
     bool folderRow(const char* label, int unread, bool selected, float indent, bool strongCount);
 
     HWND hwnd_;
@@ -137,7 +139,14 @@ private:
     struct Config {
         bool placed = false;
         int x = 0, y = 0, w = 0, h = 0;
+        std::vector<std::string> order;  // accounts, top first
+        // Folders shown per account; an account not here shows its inbox and junk.
+        std::map<std::string, std::set<std::string>> shown;
     } cfg_;
+    void sortAccounts();
+    bool folderShown(const Account& a, const Folder& f) const;
+    void setFolderShown(const Account& a, const Folder& f, bool on);
+    void moveAccount(size_t i, int d);
     void loadConfig();
     void saveConfig();
 
