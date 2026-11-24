@@ -55,7 +55,7 @@ struct Body {
     int64_t date = 0;
     bool hasRemote = false, remote = false;
     std::vector<Attachment> attachments;
-    double shownAt = 0;  // when it appeared, for marking read
+    bool markedRead = false;  // marked read on opening (or set unread by hand since)
 };
 
 // View is what the middle column shows.

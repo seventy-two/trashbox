@@ -51,6 +51,18 @@ std::string ListDate(int64_t unix, int64_t now) {
     return buf;
 }
 
+std::string TableDate(int64_t unix, int64_t now) {
+    std::tm d = local(unix), n = local(now);
+    char buf[32];
+    if (d.tm_year == n.tm_year && d.tm_yday == n.tm_yday)
+        snprintf(buf, sizeof buf, "%02d:%02d", d.tm_hour, d.tm_min);
+    else if (d.tm_year == n.tm_year)
+        snprintf(buf, sizeof buf, "%d %.3s %02d:%02d", d.tm_mday, kMonths[d.tm_mon], d.tm_hour, d.tm_min);
+    else
+        snprintf(buf, sizeof buf, "%d %.3s %d", d.tm_mday, kMonths[d.tm_mon], d.tm_year + 1900);
+    return buf;
+}
+
 std::string LongDate(int64_t unix) {
     std::tm d = local(unix);
     char buf[64];

@@ -432,7 +432,15 @@ void App::onEvent(const json& e) {
         body_.attachments.clear();
         for (const auto& a : e["attachments"])
             body_.attachments.push_back({int(num(a, "index")), str(a, "name"), str(a, "type"), num(a, "size")});
-        if (body_.shownAt == 0) body_.shownAt = ImGui::GetTime();
+        // Opening a message reads it, as in Thunderbird. Marked by its ID, so
+        // it works even if the list has been reloaded or paged since.
+        if (!body_.markedRead) {
+            body_.markedRead = true;
+            const Msg* m = nullptr;
+            for (const auto& x : list_)
+                if (x.id == body_.id) m = &x;
+            if (!m || !m->seen) markSeen(body_.id, true);
+        }
         reader_->Show(body_.url, body_.remote, paneRect_);
     } else if (t == "newmail") {
         if (GetForegroundWindow() != hwnd_) newCount_++;
@@ -469,12 +477,6 @@ void App::Pump() {
     }
     if (listStale_ && !listLoading_) loadList(false);
 
-    // Read once it's been on screen a moment, with the window in front.
-    if (body_.id && !body_.loading && body_.error.empty() && body_.shownAt > 0 &&
-        ImGui::GetTime() - body_.shownAt > 1.5 && GetForegroundWindow() == hwnd_) {
-        for (auto& m : list_)
-            if (m.id == body_.id && !m.seen) markSeen(m.id, true);
-    }
     reader_->Tick(IsWindowVisible(hwnd_) && !IsIconic(hwnd_));
     if (GetForegroundWindow() == hwnd_) newCount_ = 0;
 }
@@ -567,8 +569,9 @@ void App::Frame() {
     drawTitle(w);
     float top = 38 * k;
     float sideW = w >= 1000 * k ? 230 * k : 0;
-    float listW = std::clamp(w * 0.32f, 300 * k, 420 * k);
-    if (w - sideW - listW < 360 * k) listW = std::max(260 * k, w - sideW - 360 * k);
+    // The table gets just over half the room; the reading pane the rest.
+    float listW = std::max(420 * k, (w - sideW) * 0.56f);
+    if (w - sideW - listW < 380 * k) listW = std::max(300 * k, w - sideW - 380 * k);
     if (sideW > 0) drawSidebar(0, top, sideW, h - top);
     drawList(sideW, top, listW, h - top);
     drawReading(sideW + listW, top, w - sideW - listW, h - top);
@@ -592,7 +595,6 @@ void App::Frame() {
             for (auto& m : list_)
                 if (m.id == body_.id) {
                     markSeen(m.id, !m.seen);
-                    body_.shownAt = 1e30;  // don't mark it read again straight away
                 }
         }
     }
@@ -832,7 +834,7 @@ void App::drawList(float x, float y, float w, float h) {
             if (a.id == view_.account)
                 for (const auto& f : a.folders)
                     if (f.id == view_.folder) title = f.name;
-    // One line: what's shown, and whose it is.
+    // One line: what's shown, and whose it is; then the column names.
     ImGui::SetCursorPos(ImVec2(x + 14 * k, y + 8 * k));
     ImGui::PushFont(fonts_.semibold, kBody + 1);
     ImGui::TextUnformatted(title.c_str());
@@ -845,8 +847,21 @@ void App::drawList(float x, float y, float w, float h) {
         ellipsis(ImGui::GetWindowDrawList(), at, x + w - 14 * k, view_.account, U32(p.muted));
         ImGui::PopFont();
     }
-    float head = 36 * k;
-    bg->AddLine(ImVec2(x, y + head - 1), ImVec2(x + w - 1, y + head - 1), U32(p.border, 0.6f));
+    float cols = 36 * k, head = cols + 24 * k;
+    {
+        float avail = w - 1 - ImGui::GetStyle().ScrollbarSize;
+        float markW = (view_.unified ? 14 * k : 0) + 46 * k;
+        float dateW = 118 * k;
+        float fromW = std::clamp(avail * 0.28f, 120 * k, 260 * k);
+        bg->AddRectFilled(ImVec2(x, y + cols), ImVec2(x + w - 1, y + head), U32(p.sidebar));
+        bg->AddLine(ImVec2(x, y + head - 1), ImVec2(x + w - 1, y + head - 1), U32(p.border));
+        ImGui::PushFont(fonts_.semibold, kSmall + 0.5f);
+        float ty = y + cols + (24 * k - ImGui::GetFontSize()) / 2;
+        bg->AddText(ImVec2(x + markW, ty), U32(p.muted), "Subject");
+        bg->AddText(ImVec2(x + avail - dateW - fromW, ty), U32(p.muted), "From");
+        bg->AddText(ImVec2(x + avail - dateW, ty), U32(p.muted), "Date");
+        ImGui::PopFont();
+    }
     ImGui::SetCursorPos(ImVec2(x, y + head));
     ImGui::BeginChild("##list", ImVec2(w - 1, h - head), 0);
     if (scrollTop_) {
@@ -854,9 +869,14 @@ void App::drawList(float x, float y, float w, float h) {
         scrollTop_ = false;
     }
 
-    // Two lines a message: sender and date; subject with the preview after it.
-    const float rowH = 56 * k;
+    // A table, one line a message: marks, subject, from, date.
+    const float rowH = 27 * k;
     int64_t now = int64_t(std::time(nullptr));
+    float avail = ImGui::GetContentRegionAvail().x;
+    float markW = (view_.unified ? 14 * k : 0) + 46 * k;
+    float dateW = 118 * k;
+    float fromW = std::clamp(avail * 0.28f, 120 * k, 260 * k);
+    float subjX = markW, fromX = avail - dateW - fromW, dateX = avail - dateW;
     ImGuiListClipper clip;
     clip.Begin(int(list_.size()), rowH);
     if (scrollToSelected_) {
@@ -873,7 +893,7 @@ void App::drawList(float x, float y, float w, float h) {
     while (clip.Step()) {
         for (int i = clip.DisplayStart; i < clip.DisplayEnd; i++) {
             Msg& m = list_[size_t(i)];
-            if (i >= int(list_.size()) - 10) nearEnd = true;
+            if (i >= int(list_.size()) - 20) nearEnd = true;
             ImVec2 pos = ImGui::GetCursorScreenPos();
             float rw = ImGui::GetContentRegionAvail().x;
             ImGui::PushID(int(m.id));
@@ -883,10 +903,7 @@ void App::drawList(float x, float y, float w, float h) {
             }
             bool hov = ImGui::IsItemHovered();
             if (ImGui::BeginPopupContextItem("##ctx")) {
-                if (ImGui::MenuItem(m.seen ? "Mark as unread" : "Mark as read")) {
-                    markSeen(m.id, !m.seen);
-                    if (m.id == body_.id) body_.shownAt = 1e30;
-                }
+                if (ImGui::MenuItem(m.seen ? "Mark as unread" : "Mark as read")) markSeen(m.id, !m.seen);
                 ImGui::EndPopup();
             }
             ImGui::PopID();
@@ -894,43 +911,35 @@ void App::drawList(float x, float y, float w, float h) {
             bool sel = m.id == selected_;
             if (sel) dl->AddRectFilled(pos, ImVec2(pos.x + rw, pos.y + rowH), U32(p.selected));
             else if (hov) dl->AddRectFilled(pos, ImVec2(pos.x + rw, pos.y + rowH), U32(p.hover));
-            if (!m.seen) dl->AddRectFilled(ImVec2(pos.x, pos.y + 8 * k), ImVec2(pos.x + 2 * k, pos.y + rowH - 8 * k), U32(p.accent));
-            dl->AddLine(ImVec2(pos.x + 12 * k, pos.y + rowH - 1), ImVec2(pos.x + rw, pos.y + rowH - 1), U32(p.border, 0.4f));
+            else if (i % 2) dl->AddRectFilled(pos, ImVec2(pos.x + rw, pos.y + rowH), U32(p.sidebar, 0.45f));
+            if (!m.seen) dl->AddRectFilled(ImVec2(pos.x, pos.y + 5 * k), ImVec2(pos.x + 2 * k, pos.y + rowH - 5 * k), U32(p.accent));
 
-            float lx = pos.x + 12 * k, rx = pos.x + rw - 12 * k;
-            float y1 = pos.y + 7 * k, y2 = pos.y + 30 * k;
-            // Line 1: account dot, sender, date.
-            std::string date = ListDate(m.date, now);
-            ImGui::PushFont(fonts_.regular, kSmall + 1);
-            float dw = ImGui::CalcTextSize(date.c_str()).x;
-            dl->AddText(ImVec2(rx - dw, y1 + 1 * k), U32(m.seen ? p.muted : p.accent), date.c_str());
-            ImGui::PopFont();
-            float sx = lx;
-            if (view_.unified) {
-                dl->AddCircleFilled(ImVec2(sx + 3.5f * k, y1 + 10 * k), 3.5f * k, U32(accountColour(accountIndex(m.account))));
-                sx += 13 * k;
-            }
-            ImGui::PushFont(m.seen ? fonts_.regular : fonts_.bold, kBody + 1);
-            std::string from = m.fromName.empty() ? m.fromAddr : m.fromName;
-            ellipsis(dl, ImVec2(sx, y1), rx - dw - 10 * k, oneLine(from), U32(m.seen ? p.text : p.heading));
-            ImGui::PopFont();
-            // Line 2: subject, then the preview in grey; marks on the right.
+            ImFont* face = m.seen ? fonts_.regular : fonts_.bold;
+            ImU32 strong = U32(m.seen ? p.text : p.heading);
             ImGui::PushFont(fonts_.regular, kBody);
-            float marks = 0;
-            if (m.flagged) {
-                marks += 18 * k;
-                dl->AddText(ImVec2(rx - marks + 4 * k, y2), U32(p.bad), icon::Flag);
+            float ty = pos.y + (rowH - ImGui::GetFontSize()) / 2;
+            float mx = pos.x + 8 * k;
+            if (view_.unified) {
+                dl->AddCircleFilled(ImVec2(mx + 4 * k, pos.y + rowH / 2), 3.5f * k, U32(accountColour(accountIndex(m.account))));
+                mx += 14 * k;
             }
-            if (m.attach) {
-                marks += 18 * k;
-                dl->AddText(ImVec2(rx - marks + 4 * k, y2), U32(p.muted), icon::Attach);
-            }
-            float maxX = rx - marks - 4 * k;
+            ImGui::PushFont(fonts_.regular, kSmall);
+            float iy = pos.y + (rowH - ImGui::GetFontSize()) / 2 + 1 * k;
+            if (m.flagged) dl->AddText(ImVec2(mx, iy), U32(p.bad), icon::Flag);
+            if (m.attach) dl->AddText(ImVec2(mx + 17 * k, iy), U32(p.muted), icon::Attach);
+            ImGui::PopFont();
+            ImGui::PopFont();
+
+            ImGui::PushFont(face, kBody);
             std::string subject = m.subject.empty() ? "(no subject)" : oneLine(m.subject);
-            float subW = ImGui::CalcTextSize(subject.c_str()).x;
-            ellipsis(dl, ImVec2(lx, y2), maxX, subject, U32(m.seen ? p.muted : p.text));
-            if (!m.snippet.empty() && lx + subW + 30 * k < maxX)
-                ellipsis(dl, ImVec2(lx + subW + 8 * k, y2), maxX, oneLine(m.snippet), U32(p.muted, 0.6f));
+            ellipsis(dl, ImVec2(pos.x + subjX, ty), pos.x + fromX - 12 * k, subject, strong);
+            std::string from = m.fromName.empty() ? m.fromAddr : m.fromName;
+            ellipsis(dl, ImVec2(pos.x + fromX, ty), pos.x + dateX - 12 * k, oneLine(from), U32(m.seen ? p.muted : p.text));
+            ImGui::PopFont();
+            ImGui::PushFont(fonts_.regular, kBody - 0.5f);
+            std::string date = TableDate(m.date, now);
+            dl->AddText(ImVec2(pos.x + dateX, pos.y + (rowH - ImGui::GetFontSize()) / 2), U32(m.seen ? p.muted : p.accent),
+                        date.c_str());
             ImGui::PopFont();
         }
     }

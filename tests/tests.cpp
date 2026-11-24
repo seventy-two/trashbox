@@ -32,6 +32,9 @@ int main() {
     expect(tb::ListDate(at(2026, 11, 19, 12, 0), now), "Thu", "five days ago");
     expect(tb::ListDate(at(2026, 11, 2, 12, 0), now), "2 Nov", "this year");
     expect(tb::ListDate(at(2025, 12, 25, 12, 0), now), "25 Dec 2025", "last year");
+    expect(tb::TableDate(at(2026, 11, 24, 9, 5), now), "09:05", "table today");
+    expect(tb::TableDate(at(2026, 11, 23, 22, 8), now), "23 Nov 22:08", "table this year");
+    expect(tb::TableDate(at(2025, 12, 25, 12, 0), now), "25 Dec 2025", "table last year");
     expect(tb::LongDate(at(2026, 11, 24, 14, 5)), "Tuesday 24 November 2026, 14:05", "long date");
     expect(tb::Size(820), "820 bytes", "bytes");
     expect(tb::Size(14 * 1024), "14 KB", "kilobytes");
