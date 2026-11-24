@@ -36,6 +36,8 @@ constexpr const char* Down = "\xEE\x9C\x8D";       // U+E70D
 constexpr const char* Right = "\xEE\x9D\xAC";      // U+E76C
 constexpr const char* Picture = "\xEE\xA2\xB9";    // U+E8B9
 constexpr const char* Warning = "\xEE\x9E\xBA";    // U+E7BA
+constexpr const char* Reply = "\xEE\xA3\x8A";      // U+E8CA MailReply
+constexpr const char* ReplyAll = "\xEE\xA3\x82";   // U+E8C2 MailReplyAll
 }  // namespace icon
 
 namespace {
@@ -120,6 +122,43 @@ std::string addrList(const std::vector<Addr>& v) {
     return out;
 }
 
+// InputText on a std::string. toStart, if set, puts the cursor at the very
+// start once (a reply's quote sits below where you type).
+struct TextCb {
+    std::string* s;
+    bool* toStart;
+};
+
+int textCallback(ImGuiInputTextCallbackData* d) {
+    auto* cb = static_cast<TextCb*>(d->UserData);
+    if (d->EventFlag == ImGuiInputTextFlags_CallbackResize) {
+        cb->s->resize(size_t(d->BufTextLen));
+        d->Buf = cb->s->data();
+    } else if (d->EventFlag == ImGuiInputTextFlags_CallbackAlways && cb->toStart && *cb->toStart) {
+        d->CursorPos = d->SelectionStart = d->SelectionEnd = 0;
+        *cb->toStart = false;
+    }
+    return 0;
+}
+
+bool inputString(const char* id, std::string& s, ImVec2 size, bool multiline, ImGuiInputTextFlags flags = 0,
+                 bool* toStart = nullptr) {
+    TextCb cb{&s, toStart};
+    flags |= ImGuiInputTextFlags_CallbackResize | (toStart ? ImGuiInputTextFlags_CallbackAlways : 0);
+    if (multiline)
+        return ImGui::InputTextMultiline(id, s.data(), s.capacity() + 1, size, flags, textCallback, &cb);
+    ImGui::SetNextItemWidth(size.x);
+    return ImGui::InputText(id, s.data(), s.capacity() + 1, flags, textCallback, &cb);
+}
+
+std::vector<std::string> strings(const json& j) {
+    std::vector<std::string> out;
+    if (j.is_array())
+        for (const auto& v : j)
+            if (v.is_string()) out.push_back(v.get<std::string>());
+    return out;
+}
+
 }  // namespace
 
 const Folder* Account::Inbox() const {
@@ -175,6 +214,7 @@ App::App(HWND hwnd, std::function<void()> wake) : hwnd_(hwnd), wake_(std::move(w
             if (!part.empty()) steps_.push_back(part);
     }
     loadConfig();
+    loadDraft();
     fonts_ = LoadFonts();
     engine_ = std::make_unique<Engine>(exeDir() + L"\\trashbox-engine.exe", demo_ ? L"-demo" : L"", wake_);
     engine_->Start();
@@ -184,6 +224,7 @@ App::App(HWND hwnd, std::function<void()> wake) : hwnd_(hwnd), wake_(std::move(w
 }
 
 App::~App() {
+    saveDraft(true);
     if (engine_) engine_->Send({{"t", "quit"}});
     reader_.reset();
     engine_.reset();
@@ -264,7 +305,7 @@ bool App::InCaption(float x, float y) const {
 }
 
 bool App::Animating() const {
-    return listLoading_ || body_.loading || reader_->Loading() || (!steps_.empty() && step_ < steps_.size()) ||
+    return listLoading_ || body_.loading || draft_.loading || draft_.sending || reader_->Loading() || (!steps_.empty() && step_ < steps_.size()) ||
            (!note_.empty() && ImGui::GetTime() < noteUntil_);
 }
 
@@ -298,6 +339,7 @@ void App::loadList(bool more) {
 }
 
 void App::select(int64_t id) {
+    if (id && draft_.shown) draft_.shown = false;  // kept: the title bar's pen brings it back
     if (id == selected_) return;
     selected_ = id;
     scrollToSelected_ = true;
@@ -322,6 +364,122 @@ void App::markSeen(int64_t id, bool seen) {
     for (auto& m : list_)
         if (m.id == id) m.seen = seen;
     request({{"t", "seen"}, {"ids", {id}}, {"seen", seen}});
+}
+
+// ---------------------------------------------------------------- writing
+
+std::string App::defaultFrom() const {
+    if (!view_.unified) return view_.account;
+    if (body_.id)
+        for (const auto& m : list_)
+            if (m.id == body_.id) return m.account;
+    return accounts_.empty() ? std::string() : accounts_[0].id;
+}
+
+// startDraft refuses to replace a draft with something typed in it: that
+// one comes back instead, to be sent or thrown away first.
+static bool keepExisting(Draft& d, std::string& note, double& noteUntil) {
+    if (!d.open || !d.edited) return false;
+    d.shown = true;
+    note = "Send or discard this draft before starting another.";
+    noteUntil = ImGui::GetTime() + 6;
+    return true;
+}
+
+// freshDraft starts over. A field being typed in keeps its own copy of the
+// text, so it's let go first or the old text would come back.
+static void freshDraft(Draft& d) {
+    d = Draft();
+    ImGui::ClearActiveID();
+}
+
+void App::newMessage() {
+    if (keepExisting(draft_, note_, noteUntil_)) return;
+    if (draft_.open && !draft_.edited && draft_.kind == "New message") {
+        draft_.shown = true;
+        return;
+    }
+    freshDraft(draft_);
+    draft_.open = draft_.shown = true;
+    draft_.kind = "New message";
+    draft_.from = defaultFrom();
+    draft_.focus = 1;
+}
+
+void App::reply(bool all) {
+    if (!body_.id || body_.loading || !body_.error.empty()) return;
+    if (keepExisting(draft_, note_, noteUntil_)) return;
+    freshDraft(draft_);
+    draft_.open = draft_.shown = true;
+    draft_.loading = true;
+    draft_.kind = all ? "Reply all" : "Reply";
+    draft_.subject = body_.subject;
+    draftReq_ = nextReq_++;
+    request({{"t", "draft"}, {"id", body_.id}, {"all", all}, {"req", draftReq_}});
+}
+
+void App::sendDraft() {
+    if (draft_.sending || draft_.loading) return;
+    draft_.error.clear();
+    draft_.sending = true;
+    sendReq_ = nextReq_++;
+    json d = {{"from", draft_.from},           {"to", draft_.to},     {"cc", draft_.cc},
+              {"bcc", draft_.showBcc ? draft_.bcc : ""}, {"subject", draft_.subject}, {"body", draft_.body},
+              {"inReplyTo", draft_.inReplyTo}, {"references", draft_.references}};
+    request({{"t", "send"}, {"draft", d}, {"req", sendReq_}});
+}
+
+void App::discardDraft() {
+    freshDraft(draft_);
+    draftReq_ = sendReq_ = 0;
+    DeleteFileW((dataDir_ + L"\\draft.json").c_str());
+}
+
+// saveDraft keeps the draft on disk, so a crash or a restart doesn't lose
+// it. While typing it's saved a moment after the last change.
+void App::saveDraft(bool now) {
+    if (demo_ || !draft_.dirty) return;
+    if (!now && ImGui::GetTime() - draft_.changedAt < 1.5) return;
+    draft_.dirty = false;
+    std::wstring path = dataDir_ + L"\\draft.json";
+    if (!draft_.open || !draft_.edited) {
+        DeleteFileW(path.c_str());
+        return;
+    }
+    json j = {{"kind", draft_.kind},       {"from", draft_.from},       {"to", draft_.to},
+              {"cc", draft_.cc},           {"bcc", draft_.bcc},         {"showBcc", draft_.showBcc},
+              {"subject", draft_.subject}, {"body", draft_.body},       {"inReplyTo", draft_.inReplyTo},
+              {"references", draft_.references}};
+    std::wstring tmp = path + L".tmp";
+    {
+        std::ofstream f(tmp, std::ios::binary);
+        f << j.dump(2);
+        if (!f) return;
+    }
+    MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING);
+}
+
+void App::loadDraft() {
+    if (demo_) return;
+    std::ifstream f(dataDir_ + L"\\draft.json", std::ios::binary);
+    if (!f) return;
+    try {
+        json j = json::parse(f);
+        freshDraft(draft_);
+        draft_.open = draft_.edited = true;
+        draft_.kind = str(j, "kind");
+        draft_.from = str(j, "from");
+        draft_.to = str(j, "to");
+        draft_.cc = str(j, "cc");
+        draft_.bcc = str(j, "bcc");
+        draft_.showBcc = flag(j, "showBcc");
+        draft_.subject = str(j, "subject");
+        draft_.body = str(j, "body");
+        draft_.inReplyTo = str(j, "inReplyTo");
+        draft_.references = strings(j["references"]);
+        if (draft_.kind.empty()) draft_.kind = "New message";
+    } catch (...) {
+    }
 }
 
 bool App::inView(const std::string& account, const std::string& folder) const {
@@ -444,6 +602,25 @@ void App::onEvent(const json& e) {
             if (!m || !m->seen) markSeen(body_.id, true);
         }
         reader_->Show(body_.url, body_.remote, paneRect_);
+    } else if (t == "draft") {
+        if (req != draftReq_ || !draft_.loading) return;
+        const json& d = e["draft"];
+        draft_.loading = false;
+        draft_.from = str(d, "from");
+        draft_.to = str(d, "to");
+        draft_.cc = str(d, "cc");
+        draft_.subject = str(d, "subject");
+        draft_.body = str(d, "body");
+        draft_.inReplyTo = str(d, "inReplyTo");
+        draft_.references = strings(d["references"]);
+        draft_.focus = draft_.to.empty() ? 1 : 2;
+        draft_.bodyToStart = true;
+    } else if (t == "sent") {
+        if (req != sendReq_) return;
+        std::string to = draft_.to.empty() ? draft_.cc : draft_.to;
+        discardDraft();
+        note_ = "Sent to " + to;
+        noteUntil_ = ImGui::GetTime() + 6;
     } else if (t == "code") {
         code_ = {str(e, "from"), str(e, "code"), ImGui::GetTime() + 600};
     } else if (t == "newmail") {
@@ -452,7 +629,17 @@ void App::onEvent(const json& e) {
         noteUntil_ = ImGui::GetTime() + 6;
     } else if (t == "error") {
         if (req && req == listReq_) listLoading_ = false;
-        if (req && req == bodyReq_) {
+        if (req && (req == draftReq_ || req == sendReq_)) {
+            if (req == draftReq_ && draft_.loading) {
+                // No reply to write from: fall back to an empty one.
+                draft_.loading = false;
+                draft_.from = defaultFrom();
+                draft_.focus = 1;
+            }
+            draft_.sending = false;
+            draft_.error = str(e, "error");
+            if (!draft_.error.empty() && draft_.error[0] >= 'a' && draft_.error[0] <= 'z') draft_.error[0] -= 'a' - 'A';
+        } else if (req && req == bodyReq_) {
             body_.loading = false;
             body_.error = str(e, "error");
             reader_->Clear();
@@ -464,6 +651,7 @@ void App::onEvent(const json& e) {
         engineError_ = engine_ ? engine_->Error() : "the engine stopped";
         listLoading_ = false;
         body_.loading = false;
+        draft_.loading = draft_.sending = false;
     }
 }
 
@@ -480,6 +668,7 @@ void App::Pump() {
         if (key == VK_F5) request({{"t", "sync"}});
     }
     if (listStale_ && !listLoading_) loadList(false);
+    saveDraft(false);
 
     reader_->Tick(IsWindowVisible(hwnd_) && !IsIconic(hwnd_));
     if (GetForegroundWindow() == hwnd_) newCount_ = 0;
@@ -489,7 +678,9 @@ void App::Pump() {
 
 // testStep runs TRASHBOX_STEPS in demo mode: "wait 1.5", "select 2"
 // (the third row), "folder 0 Archive", "unified", "remote", "waitload",
-// "shot C:\\path.png", "mouse x y", "down", "up" (ImGui only), "quit".
+// "shot C:\\path.png", "mouse x y", "down", "up" (ImGui only), "new",
+// "reply", "replyall", "set to|cc|subject|body text" (body: put before the
+// quote), "send", "discard", "waitdraft", "quit".
 void App::testStep() {
     if (step_ >= steps_.size()) return;
     double now = ImGui::GetTime();
@@ -536,6 +727,29 @@ void App::testStep() {
         } else {
             io.AddMouseButtonEvent(0, cmd == "down");
         }
+    } else if (cmd == "new") {
+        newMessage();
+    } else if (cmd == "reply" || cmd == "replyall") {
+        reply(cmd == "replyall");
+    } else if (cmd == "waitdraft") {
+        if (draft_.loading || draft_.sending) return;
+    } else if (cmd == "set") {
+        // "set to a@b.com", "set body Hello\nthere" (\n for new lines)
+        std::string field, text;
+        ss >> field;
+        std::getline(ss >> std::ws, text);
+        for (size_t i; (i = text.find("\\n")) != std::string::npos;) text.replace(i, 2, "\n");
+        std::string* f = field == "to" ? &draft_.to : field == "cc" ? &draft_.cc : field == "subject" ? &draft_.subject
+                         : field == "body" ? &draft_.body : nullptr;
+        if (f) {
+            ImGui::ClearActiveID();  // as if typed: the field mustn't hold its own copy
+            *f = field == "body" ? text + draft_.body : text;
+            draft_.edited = true;
+        }
+    } else if (cmd == "send") {
+        sendDraft();
+    } else if (cmd == "discard") {
+        discardDraft();
     } else if (cmd == "remote") {
         if (body_.id) openBody(body_.id, true);
     } else if (cmd == "shot") {
@@ -595,7 +809,8 @@ void App::Frame() {
     // list's scrollbar nor the pane's browser window covers it.
     float gap = 5 * k;
     drawList(sideW, top, listW, h - top);
-    drawReading(sideW + listW + gap, top, w - sideW - listW - gap, h - top);
+    if (draft_.shown) drawCompose(sideW + listW + gap, top, w - sideW - listW - gap, h - top);
+    else drawReading(sideW + listW + gap, top, w - sideW - listW - gap, h - top);
     drawDivider(sideW, sideW + listW, top, h - top, room, sideW + minList, w - minRead);
 
     // Keys, unless something's taking typing.
@@ -611,9 +826,14 @@ void App::Frame() {
         };
         if (ImGui::IsKeyPressed(ImGuiKey_DownArrow) || ImGui::IsKeyPressed(ImGuiKey_J)) move(1);
         if (ImGui::IsKeyPressed(ImGuiKey_UpArrow) || ImGui::IsKeyPressed(ImGuiKey_K)) move(-1);
-        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) select(0);
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape) && !draft_.shown) select(0);
+        // Writing: N (or Ctrl+N) new, R reply, A or Ctrl+Shift+R reply all.
+        ImGuiIO& io = ImGui::GetIO();
+        if (ImGui::IsKeyPressed(ImGuiKey_N, false) && !io.KeyAlt) newMessage();
+        if (ImGui::IsKeyPressed(ImGuiKey_R, false) && !io.KeyAlt && !draft_.shown) reply(io.KeyShift && io.KeyCtrl);
+        if (ImGui::IsKeyPressed(ImGuiKey_A, false) && !io.KeyCtrl && !io.KeyAlt && !draft_.shown) reply(true);
         if (ImGui::IsKeyPressed(ImGuiKey_F5)) request({{"t", "sync"}});
-        if (ImGui::IsKeyPressed(ImGuiKey_U) && body_.id) {
+        if (ImGui::IsKeyPressed(ImGuiKey_U) && body_.id && !draft_.shown) {
             for (auto& m : list_)
                 if (m.id == body_.id) {
                     markSeen(m.id, !m.seen);
@@ -623,7 +843,7 @@ void App::Frame() {
     ImGui::End();
 
     bool popup = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId);
-    paneHidden_ = popup || body_.loading || !body_.error.empty() || body_.id == 0;
+    paneHidden_ = popup || draft_.shown || body_.loading || !body_.error.empty() || body_.id == 0;
     reader_->Place(paneRect_, paneHidden_);
     (void)p;
 }
@@ -727,6 +947,13 @@ void App::drawTitle(float width) {
     // Full-height buttons, glyphs centred, like Windows' own.
     float bw = 46 * k;
     float bx = width - 4 * bw;
+    bool hiddenDraft = draft_.open && !draft_.shown;
+    if (titleButton(icon::Draft, hiddenDraft ? "Back to your draft" : "New message (N)", bx - bw, bw, h)) {
+        if (hiddenDraft) draft_.shown = true;
+        else newMessage();
+    }
+    if (hiddenDraft)  // a dot: there's a draft waiting
+        ImGui::GetWindowDrawList()->AddCircleFilled(ImVec2(bx - bw / 2 + 9 * k, h / 2 - 7 * k), 3.5f * k, U32(p.accent));
     if (titleButton(icon::Refresh, "Check for new mail (F5)", bx, bw, h)) request({{"t", "sync"}});
     if (titleButton(icon::Minimise, "", bx + bw, bw, h)) ::ShowWindow(hwnd_, SW_MINIMIZE);
     bool zoomed = IsZoomed(hwnd_);
@@ -1074,10 +1301,27 @@ void App::drawReading(float x, float y, float w, float h) {
         if (x2.id == body_.id) m = &x2;
 
     float pad = 22 * k;
+    // Reply and Reply all, top right.
+    float btnsW = 0;
+    if (!body_.loading && body_.error.empty()) {
+        ImGui::PushFont(fonts_.regular, kSmall + 1);
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10 * k, 5 * k));
+        std::string r1 = std::string(icon::Reply) + "  Reply", r2 = std::string(icon::ReplyAll) + "  Reply all";
+        float w1 = ImGui::CalcTextSize(r1.c_str()).x + 20 * k, w2 = ImGui::CalcTextSize(r2.c_str()).x + 20 * k;
+        btnsW = w1 + w2 + 6 * k + 12 * k;
+        ImGui::SetCursorPos(ImVec2(x + w - pad - w1 - w2 - 6 * k, y + 14 * k));
+        if (ImGui::Button(r1.c_str(), ImVec2(w1, 0))) reply(false);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) ImGui::SetTooltip("Reply to the sender (R)");
+        ImGui::SameLine(0, 6 * k);
+        if (ImGui::Button(r2.c_str(), ImVec2(w2, 0))) reply(true);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) ImGui::SetTooltip("Reply to everyone on it (A)");
+        ImGui::PopStyleVar();
+        ImGui::PopFont();
+    }
     ImGui::SetCursorPos(ImVec2(x + pad, y + 16 * k));
     ImGui::BeginGroup();
     float textW = w - 2 * pad;
-    ImGui::PushTextWrapPos(x + pad + textW);
+    ImGui::PushTextWrapPos(x + pad + textW - btnsW);
     // Subject.
     std::string subject = !body_.subject.empty() ? body_.subject : m ? m->subject : "";
     ImGui::PushFont(fonts_.semibold, kH1 + 2);
@@ -1175,6 +1419,146 @@ void App::drawReading(float x, float y, float w, float h) {
         ImGui::TextColored(p.bad, "%s", reader_->Error().c_str());
     }
     paneRect_ = RECT{LONG(x), LONG(top), LONG(x + w), LONG(y + h)};
+}
+
+// drawCompose is the draft, in place of the reading pane: who it's from and
+// to, the subject, and the text. Ctrl+Enter sends.
+void App::drawCompose(float x, float y, float w, float h) {
+    const Palette& p = Colours();
+    const float k = scale_;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + h), U32(p.bg));
+    paneRect_ = RECT{LONG(x), LONG(y + h), LONG(x + w), LONG(y + h)};
+    float pad = 22 * k;
+
+    // Esc would undo everything typed since the field was clicked (ImGui's
+    // "revert"): let go of the field first, so Esc only leaves it.
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) && ImGui::GetIO().WantTextInput) ImGui::ClearActiveID();
+    bool ctrlEnter = ImGui::GetIO().KeyCtrl &&
+                     (ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false));
+
+    ImGui::SetCursorPos(ImVec2(x + pad, y + 14 * k));
+    ImGui::BeginGroup();
+    ImGui::PushFont(fonts_.semibold, kH1 + 2);
+    ImGui::TextUnformatted(draft_.kind.c_str());
+    ImGui::PopFont();
+    ImGui::EndGroup();
+
+    // Send and Discard, top right.
+    ImGui::PushFont(fonts_.regular, kSmall + 1);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12 * k, 5 * k));
+    std::string sendLabel = std::string(icon::Send) + "  " + (draft_.sending ? "Sending\xE2\x80\xA6" : "Send");
+    float sw = ImGui::CalcTextSize(sendLabel.c_str()).x + 24 * k, dw = ImGui::CalcTextSize("Discard").x + 24 * k;
+    ImGui::SetCursorPos(ImVec2(x + w - pad - sw - dw - 6 * k, y + 14 * k));
+    ImGui::BeginDisabled(draft_.sending || draft_.loading);
+    if (ImGui::Button("Discard", ImVec2(dw, 0))) ImGui::OpenPopup("##discard");
+    ImGui::SameLine(0, 6 * k);
+    ImGui::PushStyleColor(ImGuiCol_Button, p.accent);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(p.accent.x * 1.1f, p.accent.y * 1.1f, p.accent.z * 1.1f, 1));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(p.accent.x * 0.9f, p.accent.y * 0.9f, p.accent.z * 0.9f, 1));
+    ImGui::PushStyleColor(ImGuiCol_Text, Hex(0xFFFFFF));
+    if (ImGui::Button(sendLabel.c_str(), ImVec2(sw, 0)) || ctrlEnter) sendDraft();
+    ImGui::PopStyleColor(4);
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal | ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("Send (Ctrl+Enter)");
+    ImGui::EndDisabled();
+    if (ImGui::BeginPopup("##discard")) {
+        ImGui::TextUnformatted("Throw this draft away?");
+        ImGui::Dummy(ImVec2(0, 4 * k));
+        if (ImGui::Button("Discard")) {
+            discardDraft();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Keep writing")) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+    ImGui::PopStyleVar();
+    ImGui::PopFont();
+    if (!draft_.open) return;  // just discarded
+
+    float fy = y + 58 * k;
+    if (draft_.loading) {
+        ImGui::PushFont(fonts_.regular, kSmall + 0.5f);
+        dl->AddText(ImVec2(x + pad, fy), U32(p.muted), "Writing the reply\xE2\x80\xA6");
+        ImGui::PopFont();
+        return;
+    }
+
+    bool changed = false;
+    float labelW = 64 * k, fieldW = w - 2 * pad - labelW;
+    ImGui::PushFont(fonts_.regular, kBody);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8 * k, 6 * k));
+    float rowH = ImGui::GetFontSize() + 12 * k + 6 * k;
+    auto label = [&](const char* text) {
+        ImGui::SetCursorScreenPos(ImVec2(x + pad, fy + 6 * k));
+        ImGui::TextColored(p.muted, "%s", text);
+        ImGui::SetCursorScreenPos(ImVec2(x + pad + labelW, fy));
+    };
+    auto field = [&](const char* name, const char* id, std::string& s, int focusId, float width) {
+        label(name);
+        if (focusId && draft_.focus == focusId) {
+            // By ID: SetKeyboardFocusHere's tabbing lands on the wrong field.
+            ImGui::ActivateItemByID(ImGui::GetID(id));
+            draft_.focus = 0;
+        }
+        changed |= inputString(id, s, ImVec2(width, 0), false);
+        fy += rowH;
+    };
+
+    // From: one of the accounts.
+    label("From");
+    ImGui::SetNextItemWidth(fieldW);
+    if (ImGui::BeginCombo("##from", draft_.from.empty() ? "Pick an account" : draft_.from.c_str())) {
+        for (size_t i = 0; i < accounts_.size(); i++) {
+            const Account& a = accounts_[i];
+            if (ImGui::Selectable(a.id.c_str(), a.id == draft_.from)) {
+                changed |= draft_.from != a.id;
+                draft_.from = a.id;
+            }
+        }
+        ImGui::EndCombo();
+    }
+    fy += rowH;
+    field("To", "##to", draft_.to, 1, fieldW);
+    // Cc, with a toggle for Bcc beside it.
+    float bccW = 52 * k;
+    field("Cc", "##cc", draft_.cc, 0, draft_.showBcc ? fieldW : fieldW - bccW - 6 * k);
+    if (!draft_.showBcc) {
+        ImGui::SetCursorScreenPos(ImVec2(x + w - pad - bccW, fy - rowH));
+        if (ImGui::Button("Bcc", ImVec2(bccW, 0))) draft_.showBcc = true;
+    } else {
+        field("Bcc", "##bcc", draft_.bcc, 0, fieldW);
+    }
+    field("Subject", "##subject", draft_.subject, 0, fieldW);
+
+    // The text.
+    fy += 6 * k;
+    float bodyH = y + h - fy - (draft_.error.empty() ? pad : pad + 30 * k);
+    ImGui::SetCursorScreenPos(ImVec2(x + pad, fy));
+    if (draft_.focus == 2) {
+        ImGui::ActivateItemByID(ImGui::GetID("##body"));
+        draft_.focus = 0;
+    }
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12 * k, 10 * k));
+    ImGui::PushFont(fonts_.regular, kBody + 0.5f);
+    changed |= inputString("##body", draft_.body, ImVec2(w - 2 * pad, std::max(80 * k, bodyH)), true,
+                           ImGuiInputTextFlags_WordWrap, &draft_.bodyToStart);
+    ImGui::PopFont();
+    ImGui::PopStyleVar(2);
+    ImGui::PopFont();
+
+    if (!draft_.error.empty()) {
+        ImGui::SetCursorScreenPos(ImVec2(x + pad, y + h - pad - 22 * k));
+        ImGui::PushTextWrapPos(x + w - pad);
+        ImGui::TextColored(p.bad, "%s", draft_.error.c_str());
+        ImGui::PopTextWrapPos();
+    }
+    if (changed) {
+        draft_.edited = draft_.dirty = true;
+        draft_.changedAt = ImGui::GetTime();
+        draft_.error.clear();
+    }
 }
 
 }  // namespace tb

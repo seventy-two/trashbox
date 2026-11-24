@@ -25,6 +25,11 @@ and Gmail (IMAP).
   numbers and sign-in links are left alone. It can also post each code to
   a webhook (`trashbox-engine spike set-codes-hook`, URL on stdin), for
   example to get it on your phone.
+- **Reply and write.** Reply, Reply all (everyone on it but you) and new
+  messages, in plain text, from any account. Replies quote the original
+  and thread properly (In-Reply-To and References). Outlook sends through
+  Graph and Gmail over SMTP, and both keep a copy in Sent. The draft
+  survives reading other mail, and a restart. Keys: R, A, N; Ctrl+Enter sends.
 - **Small.** Mail is opened read when you open it, a draggable divider sets
   the list and reading pane sizes, and it sits in the tray when closed.
 
@@ -32,8 +37,8 @@ and Gmail (IMAP).
 | --- | --- | --- |
 | ![](docs/plain.png) | ![](docs/blocked.png) | ![](docs/code.png) |
 
-Work in progress: reading works. Archive, delete, search and saving
-attachments are next, then reply and compose.
+Work in progress: reading, replying and writing work. Archive, delete,
+search, forwarding and saving attachments are next.
 
 ## Accounts
 

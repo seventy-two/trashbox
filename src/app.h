@@ -58,6 +58,26 @@ struct Body {
     bool markedRead = false;  // marked read on opening (or set unread by hand since)
 };
 
+// Draft is a message being written, shown in place of the reading pane.
+// It's kept (and saved to draft.json) until it's sent or thrown away, so
+// reading other mail meanwhile loses nothing.
+struct Draft {
+    bool open = false;   // there is a draft
+    bool shown = false;  // it's in the right-hand pane now
+    std::string kind;    // "New message", "Reply", "Reply all"
+    std::string from, to, cc, bcc, subject, body, inReplyTo;
+    std::vector<std::string> references;
+    bool showBcc = false;
+    bool loading = false;  // waiting for the engine to write the reply
+    bool sending = false;
+    std::string error;
+    bool dirty = false;     // changed since saved to disk
+    double changedAt = 0;
+    int focus = 0;          // 1 = To, 2 = body: put the cursor there next frame
+    bool bodyToStart = false;
+    bool edited = false;    // the user has typed in it
+};
+
 // View is what the middle column shows.
 struct View {
     bool unified = true;
@@ -91,6 +111,13 @@ private:
     void select(int64_t id);
     void openBody(int64_t id, bool remote);
     void markSeen(int64_t id, bool seen);
+    void newMessage();
+    void reply(bool all);
+    void sendDraft();
+    void discardDraft();
+    void saveDraft(bool now);
+    void loadDraft();
+    std::string defaultFrom() const;
     bool inView(const std::string& account, const std::string& folder) const;
     std::string accountLabel(const std::string& id) const;
     int accountIndex(const std::string& id) const;
@@ -100,6 +127,7 @@ private:
     void drawSidebar(float x, float y, float w, float h);
     void drawList(float x, float y, float w, float h);
     void drawReading(float x, float y, float w, float h);
+    void drawCompose(float x, float y, float w, float h);
     void drawDivider(float left, float x, float y, float h, float room, float minX, float maxX);
     bool iconButton(const char* glyph, const char* tip, float size = 30, bool danger = false);
     bool titleButton(const char* glyph, const char* tip, float x, float w, float h, bool danger = false);
@@ -126,6 +154,8 @@ private:
     Body body_;
     int64_t bodyReq_ = 0;
     RECT paneRect_{};
+    Draft draft_;
+    int64_t draftReq_ = 0, sendReq_ = 0;
     bool paneHidden_ = true;
 
     int newCount_ = 0;
