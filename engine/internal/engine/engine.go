@@ -66,9 +66,11 @@ type Settings struct {
 	OlderPage int           // messages fetched per trip into older mail
 }
 
-// DefaultSettings are the real ones.
+// DefaultSettings are the real ones. Accounts without push (Outlook) are
+// checked every 15 s, so sign-in codes arrive promptly: a delta query
+// with nothing new is one small request.
 var DefaultSettings = Settings{
-	Window: 60 * 24 * time.Hour, Poll: time.Minute, PushPoll: 5 * time.Minute,
+	Window: 60 * 24 * time.Hour, Poll: 15 * time.Second, PushPoll: 5 * time.Minute,
 	Retry: 30 * time.Second, Debounce: time.Second, OlderPage: 100,
 }
 
