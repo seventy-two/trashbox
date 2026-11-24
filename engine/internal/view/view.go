@@ -103,7 +103,7 @@ func Write(dir string, id int64, m *mailparse.Message, remote bool) (Page, error
 }
 
 const textStyle = `:root{color-scheme:light dark}
-body{margin:16px 20px;font:14px/1.5 "Petrov Sans","Segoe UI",system-ui,sans-serif}
+body{margin:18px 22px;font:15.5px/1.55 "Petrov Sans","Segoe UI",system-ui,sans-serif}
 .tb-text{white-space:pre-wrap;word-wrap:break-word;font:inherit;margin:0}
 a{color:#2f7de1}`
 

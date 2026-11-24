@@ -611,8 +611,8 @@ void App::drawTitle(float width) {
     barMax_ = ImVec2(width, h);
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddRectFilled(ImVec2(0, 0), ImVec2(width, h), U32(p.rail));
-    ImGui::SetCursorPos(ImVec2(14 * k, 12 * k));
-    ImGui::PushFont(fonts_.bold, 12);
+    ImGui::SetCursorPos(ImVec2(14 * k, 9 * k));
+    ImGui::PushFont(fonts_.bold, 16);
     ImGui::TextColored(p.accent, "trashbox");
     ImGui::PopFont();
 
@@ -622,9 +622,9 @@ void App::drawTitle(float width) {
         if (a.status == "syncing" || a.status == "connecting") syncing++;
         if (a.status == "error") failed++;
     }
-    ImGui::SameLine(0, 12 * k);
-    ImGui::SetCursorPosY(11 * k);
-    ImGui::PushFont(fonts_.regular, kSmall);
+    ImGui::SameLine(0, 14 * k);
+    ImGui::SetCursorPosY(12 * k);
+    ImGui::PushFont(fonts_.regular, kSmall + 0.5f);
     if (!engineError_.empty()) ImGui::TextColored(p.bad, "%s", engineError_.c_str());
     else if (failed) {
         ImGui::TextColored(p.idle, "%s %d account%s can't connect", icon::Warning, failed, failed == 1 ? "" : "s");
@@ -833,19 +833,19 @@ void App::drawList(float x, float y, float w, float h) {
                 for (const auto& f : a.folders)
                     if (f.id == view_.folder) title = f.name;
     // One line: what's shown, and whose it is.
-    ImGui::SetCursorPos(ImVec2(x + 14 * k, y + 9 * k));
-    ImGui::PushFont(fonts_.semibold, kBody);
+    ImGui::SetCursorPos(ImVec2(x + 14 * k, y + 8 * k));
+    ImGui::PushFont(fonts_.semibold, kBody + 1);
     ImGui::TextUnformatted(title.c_str());
     ImGui::PopFont();
     if (!view_.unified) {
         ImGui::SameLine(0, 8 * k);
-        ImGui::PushFont(fonts_.regular, kSmall);
+        ImGui::PushFont(fonts_.regular, kSmall + 0.5f);
         ImGui::SetCursorPosY(y + 10 * k);
         ImVec2 at = ImGui::GetCursorScreenPos();
         ellipsis(ImGui::GetWindowDrawList(), at, x + w - 14 * k, view_.account, U32(p.muted));
         ImGui::PopFont();
     }
-    float head = 34 * k;
+    float head = 36 * k;
     bg->AddLine(ImVec2(x, y + head - 1), ImVec2(x + w - 1, y + head - 1), U32(p.border, 0.6f));
     ImGui::SetCursorPos(ImVec2(x, y + head));
     ImGui::BeginChild("##list", ImVec2(w - 1, h - head), 0);
@@ -855,7 +855,7 @@ void App::drawList(float x, float y, float w, float h) {
     }
 
     // Two lines a message: sender and date; subject with the preview after it.
-    const float rowH = 46 * k;
+    const float rowH = 56 * k;
     int64_t now = int64_t(std::time(nullptr));
     ImGuiListClipper clip;
     clip.Begin(int(list_.size()), rowH);
@@ -898,31 +898,31 @@ void App::drawList(float x, float y, float w, float h) {
             dl->AddLine(ImVec2(pos.x + 12 * k, pos.y + rowH - 1), ImVec2(pos.x + rw, pos.y + rowH - 1), U32(p.border, 0.4f));
 
             float lx = pos.x + 12 * k, rx = pos.x + rw - 12 * k;
-            float y1 = pos.y + 6 * k, y2 = pos.y + 25 * k;
+            float y1 = pos.y + 7 * k, y2 = pos.y + 30 * k;
             // Line 1: account dot, sender, date.
             std::string date = ListDate(m.date, now);
-            ImGui::PushFont(fonts_.regular, kSmall);
+            ImGui::PushFont(fonts_.regular, kSmall + 1);
             float dw = ImGui::CalcTextSize(date.c_str()).x;
             dl->AddText(ImVec2(rx - dw, y1 + 1 * k), U32(m.seen ? p.muted : p.accent), date.c_str());
             ImGui::PopFont();
             float sx = lx;
             if (view_.unified) {
-                dl->AddCircleFilled(ImVec2(sx + 3 * k, y1 + 9 * k), 3 * k, U32(accountColour(accountIndex(m.account))));
-                sx += 11 * k;
+                dl->AddCircleFilled(ImVec2(sx + 3.5f * k, y1 + 10 * k), 3.5f * k, U32(accountColour(accountIndex(m.account))));
+                sx += 13 * k;
             }
-            ImGui::PushFont(m.seen ? fonts_.regular : fonts_.bold, kSmall + 1.0f);
+            ImGui::PushFont(m.seen ? fonts_.regular : fonts_.bold, kBody + 1);
             std::string from = m.fromName.empty() ? m.fromAddr : m.fromName;
             ellipsis(dl, ImVec2(sx, y1), rx - dw - 10 * k, oneLine(from), U32(m.seen ? p.text : p.heading));
             ImGui::PopFont();
             // Line 2: subject, then the preview in grey; marks on the right.
-            ImGui::PushFont(fonts_.regular, kSmall);
+            ImGui::PushFont(fonts_.regular, kBody);
             float marks = 0;
             if (m.flagged) {
-                marks += 16 * k;
+                marks += 18 * k;
                 dl->AddText(ImVec2(rx - marks + 4 * k, y2), U32(p.bad), icon::Flag);
             }
             if (m.attach) {
-                marks += 16 * k;
+                marks += 18 * k;
                 dl->AddText(ImVec2(rx - marks + 4 * k, y2), U32(p.muted), icon::Attach);
             }
             float maxX = rx - marks - 4 * k;
@@ -989,19 +989,19 @@ void App::drawReading(float x, float y, float w, float h) {
     ImGui::PushTextWrapPos(x + pad + textW);
     // Subject.
     std::string subject = !body_.subject.empty() ? body_.subject : m ? m->subject : "";
-    ImGui::PushFont(fonts_.semibold, kH2);
+    ImGui::PushFont(fonts_.semibold, kH1 + 2);
     ImGui::TextUnformatted(subject.empty() ? "(no subject)" : subject.c_str());
     ImGui::PopFont();
     ImGui::Dummy(ImVec2(0, 4 * k));
     // From, with the address in full: it's what tells a real sender from a fake.
     if (!body_.from.empty()) {
         const Addr& f = body_.from[0];
-        ImGui::PushFont(fonts_.semibold, kBody);
+        ImGui::PushFont(fonts_.semibold, kH3 + 0.5f);
         ImGui::TextUnformatted(f.name.empty() ? f.addr.c_str() : f.name.c_str());
         ImGui::PopFont();
         if (!f.name.empty()) {
             ImGui::SameLine(0, 6 * k);
-            ImGui::PushFont(fonts_.regular, kSmall + 0.5f);
+            ImGui::PushFont(fonts_.regular, kBody + 0.5f);
             ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 1 * k);
             ImGui::TextColored(p.muted, "<%s>", f.addr.c_str());
             ImGui::PopFont();
@@ -1012,7 +1012,7 @@ void App::drawReading(float x, float y, float w, float h) {
         ImGui::PopFont();
     }
     ImGui::PopTextWrapPos();
-    ImGui::PushFont(fonts_.regular, kSmall + 0.5f);
+    ImGui::PushFont(fonts_.regular, kBody + 0.5f);
     float lineMax = x + w - pad;
     auto line = [&](const std::string& text) {
         ImVec2 at = ImGui::GetCursorScreenPos();
@@ -1029,7 +1029,7 @@ void App::drawReading(float x, float y, float w, float h) {
     // Attachments.
     if (!body_.attachments.empty()) {
         ImGui::Dummy(ImVec2(0, 4 * k));
-        ImGui::PushFont(fonts_.regular, kSmall);
+        ImGui::PushFont(fonts_.regular, kSmall + 1);
         float cx = x + pad;
         for (const auto& a : body_.attachments) {
             std::string label = std::string(icon::Attach) + " " + a.name + "  " + Size(a.size);
