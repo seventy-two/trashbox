@@ -31,74 +31,16 @@ type Provider struct {
 
 var _ mailbox.Provider = (*Provider)(nil)
 
-type seed struct {
-	ago      time.Duration
-	name     string
-	addr     string
-	subject  string
-	text     string
-	html     string
-	seen     bool
-	flagged  bool
-	attach   bool
-	folderID string
+// account is one demo account's mail.
+type account struct {
+	id, kind string
+	inbox    []seed
+	junk     []seed
+	codes    bool
 }
 
-const newsletter = `<html><body style="margin:0;background:#f3efe6;font-family:Georgia,serif">
-<table width="100%" cellpadding="0" cellspacing="0"><tr><td align="center">
-<table width="560" cellpadding="24" style="background:#fffdf8">
-<tr><td><img src="https://images.example.com/allotment/header.jpg" width="512" alt="Allotment Weekly"></td></tr>
-<tr><td><h1 style="color:#4a5a2a;font-weight:normal">Leeks, at last</h1>
-<p style="color:#333;line-height:1.6">The frost held off long enough this week for the leeks to thicken up nicely.
-Plot 14 is still winning the marrow argument, and the shed roof has been patched (again).</p>
-<p style="color:#333;line-height:1.6">This Saturday: seed swap at the gate from 10 until the tea runs out.</p>
-<p><a href="https://allotment.example.com/swap" style="background:#4a5a2a;color:#fff;padding:10px 18px;text-decoration:none">See what's on the table</a></p>
-</td></tr></table></td></tr></table></body></html>`
-
-const receipt = `<html><body style="font-family:Arial,sans-serif;color:#222">
-<h2 style="margin:0 0 12px">Thanks for your order</h2>
-<p>Order <b>KB-48213</b> is on its way.</p>
-<table cellpadding="6" style="border-collapse:collapse">
-<tr style="background:#eee"><th align="left">Item</th><th align="right">Price</th></tr>
-<tr><td>Kettle, brushed steel</td><td align="right">£34.00</td></tr>
-<tr><td>Descaler (2 pack)</td><td align="right">£4.50</td></tr>
-<tr><td><b>Total</b></td><td align="right"><b>£38.50</b></td></tr></table>
-<p style="color:#666;font-size:12px">Kettle &amp; Bean Ltd · this is an invented shop</p></body></html>`
-
-var seeds = map[string][]seed{
-	"inbox": {
-		{ago: 4 * time.Minute, name: "Fernhill Bank", addr: "no-reply@fernhill.example", subject: "Your sign-in code",
-			text: "Your Fernhill sign-in code is 482913.\n\nIt expires in 10 minutes. If this wasn't you, you can ignore this email."},
-		{ago: 40 * time.Minute, name: "Priya Shah", addr: "priya@example.org", subject: "Sunday roast?",
-			text: "Are you still up for Sunday? I'm thinking the place by the river, about 1pm.\n\nSam's coming too, and might bring the dog.\n\nP"},
-		{ago: 3 * time.Hour, name: "Allotment Weekly", addr: "news@allotment.example.com", subject: "Leeks, at last 🌱", html: newsletter},
-		{ago: 7 * time.Hour, name: "Kettle & Bean", addr: "orders@kettlebean.example", subject: "Order KB-48213 is on its way", html: receipt, seen: true, attach: true},
-		{ago: 26 * time.Hour, name: "Tom Okafor", addr: "tom.okafor@example.net", subject: "Re: bike lights", seen: true, flagged: true,
-			text: "Found them. They were in the hall cupboard behind the hoover, obviously.\n\nI'll drop them round on Thursday.\n\n> Did you ever find the bike lights?\n> I can't find mine anywhere."},
-		{ago: 50 * time.Hour, name: "Harbourside Cinema", addr: "tickets@harbourside.example", subject: "Your tickets for Friday", seen: true,
-			html: `<div style="font-family:Segoe UI,sans-serif"><h2>Friday, 19:40, Screen 3</h2><p>Seats <b>F7, F8</b>. Show this email at the door.</p></div>`},
-		{ago: 5 * 24 * time.Hour, name: "Council Tax", addr: "billing@council.example.gov", subject: "Your new bill", seen: true,
-			text: "Your bill for next year is ready to view online.\n\nhttps://council.example.gov/bills"},
-	},
-	"older": {
-		{ago: 80 * 24 * time.Hour, name: "Priya Shah", addr: "priya@example.org", subject: "Photos from the walk", seen: true, attach: true,
-			text: "A few from the top of the hill. The fog did lift in the end!"},
-		{ago: 95 * 24 * time.Hour, name: "Railcard", addr: "renewals@railcard.example", subject: "Time to renew", seen: true,
-			text: "Your railcard runs out next month."},
-	},
-}
-
-var seeds2 = []seed{
-	{ago: 20 * time.Minute, name: "Climbing Club", addr: "hello@climbing.example", subject: "Wednesday session moved to 7pm",
-		text: "The wall's being reset, so we're starting an hour later this week."},
-	{ago: 9 * time.Hour, name: "Mum", addr: "mum@example.com", subject: "Christmas", seen: true,
-		text: "Let me know about Christmas soon please! Dad wants to book the train."},
-	{ago: 4 * 24 * time.Hour, name: "Bookshop on the Corner", addr: "shop@books.example", subject: "Your reservation is in", seen: true,
-		text: "The book you reserved has arrived. We'll keep it behind the counter for two weeks."},
-}
-
-func build(now time.Time, inbox []seed, older []seed) *Provider {
-	p := &Provider{msgs: map[string][]*msg{}}
+func build(now time.Time, a account) *Provider {
+	p := &Provider{msgs: map[string][]*msg{}, codes: a.codes}
 	p.folders = []mailbox.Folder{
 		{ID: "inbox", Name: "Inbox", Role: mailbox.RoleInbox},
 		{ID: "sent", Name: "Sent", Role: mailbox.RoleSent},
@@ -117,17 +59,31 @@ func build(now time.Time, inbox []seed, older []seed) *Provider {
 		}, html: s.html, text: s.text}
 		p.msgs[folder] = append(p.msgs[folder], m)
 	}
-	for _, s := range inbox {
+	for _, s := range a.inbox {
 		add("inbox", s)
 	}
-	for _, s := range older {
-		add("inbox", s)
+	for _, s := range a.junk {
+		add("junk", s)
 	}
-	add("sent", seed{ago: 30 * time.Minute, name: "Me", addr: "me@example.com", subject: "Re: Sunday roast?", seen: true, text: "Yes! 1pm is perfect."})
-	add("junk", seed{ago: 2 * time.Hour, name: "Prize Desk", addr: "winner@prizes.example", subject: "You've won (again)", text: "Claim now!"})
+	add("sent", seed{ago: 30 * time.Minute, name: "Me", addr: a.id, subject: "Re: Sunday roast?", seen: true, text: "Yes! 1pm is perfect."})
 	add("receipts", seed{ago: 40 * 24 * time.Hour, name: "Kettle & Bean", addr: "orders@kettlebean.example", subject: "Order KB-40017", seen: true, html: receipt})
 	p.recount()
 	return p
+}
+
+// Accounts returns the demo accounts. TRASHBOX_DEMO_IMG replaces the
+// allotment newsletter's picture, so a test can watch a server for the
+// request.
+func Accounts() []engine.Account {
+	now := time.Now()
+	if img := os.Getenv("TRASHBOX_DEMO_IMG"); img != "" {
+		allotmentImg = img
+	}
+	var out []engine.Account
+	for _, a := range accounts() {
+		out = append(out, engine.Account{ID: a.id, Kind: a.kind, Provider: build(now, a)})
+	}
+	return out
 }
 
 func (p *Provider) recount() {
@@ -140,24 +96,6 @@ func (p *Provider) recount() {
 			}
 		}
 	}
-}
-
-// Accounts returns the two demo accounts. TRASHBOX_DEMO_IMG replaces the
-// newsletter's picture, so a test can watch a server for the request.
-func Accounts() []engine.Account {
-	now := time.Now()
-	if img := os.Getenv("TRASHBOX_DEMO_IMG"); img != "" {
-		seeds["inbox"][2].html = strings.Replace(newsletter, "https://images.example.com/allotment/header.jpg", img, 1)
-	}
-	return []engine.Account{
-		{ID: "me@example.com", Kind: "outlook", Provider: withCodes(build(now, seeds["inbox"], seeds["older"]))},
-		{ID: "me.too@example.org", Kind: "gmail", Provider: build(now, seeds2, nil)},
-	}
-}
-
-func withCodes(p *Provider) *Provider {
-	p.codes = true
-	return p
 }
 
 // Folders lists the folders.
