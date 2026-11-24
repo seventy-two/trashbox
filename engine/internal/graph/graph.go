@@ -65,11 +65,7 @@ func (c *Client) doRaw(ctx context.Context, method, path string, read func(io.Re
 func (c *Client) send(ctx context.Context, method, path string, body io.Reader, contentType string, read func(io.Reader) error) error {
 	u := path
 	if !strings.HasPrefix(path, "https://") && !strings.HasPrefix(path, "http://") {
-		base := c.Base
-		if base == "" {
-			base = DefaultBase
-		}
-		u = base + path
+		u = c.base() + path
 	}
 	token := c.Token
 	if c.Tokens != nil {
@@ -203,4 +199,109 @@ func (c *Client) SendText(ctx context.Context, to []string, subject, body string
 func (c *Client) SendMIME(ctx context.Context, raw []byte) error {
 	body := base64.StdEncoding.EncodeToString(raw)
 	return c.send(ctx, http.MethodPost, "/me/sendMail", strings.NewReader(body), "text/plain", func(io.Reader) error { return nil })
+}
+
+// File is an attachment for SendLarge.
+type File struct {
+	Name, Type string
+	Data       []byte
+}
+
+// mimeLimit is the most SendMIME sends in one request: Graph turns away
+// requests over 4 MB, and the MIME goes base64-encoded.
+const mimeLimit = 3 << 20
+
+// smallAttach is the biggest file added in one request; bigger ones go up
+// in chunks through an upload session.
+const smallAttach = 3 << 20
+
+// Send sends a message: in one go if it's small enough, otherwise as a
+// draft (made from text, the message without its attachments) with the
+// files added to it, then sent. Either way a copy goes to Sent Items.
+func (c *Client) Send(ctx context.Context, raw, text []byte, files []File) error {
+	if len(raw) <= mimeLimit || len(files) == 0 {
+		return c.SendMIME(ctx, raw)
+	}
+	var draft struct {
+		ID string `json:"id"`
+	}
+	err := c.send(ctx, http.MethodPost, "/me/messages", strings.NewReader(base64.StdEncoding.EncodeToString(text)), "text/plain",
+		func(r io.Reader) error { return json.NewDecoder(r).Decode(&draft) })
+	if err != nil {
+		return fmt.Errorf("making the draft: %w", err)
+	}
+	if draft.ID == "" {
+		return fmt.Errorf("making the draft: no id came back")
+	}
+	msg := "/me/messages/" + url.PathEscape(draft.ID)
+	fail := func(err error) error {
+		// Don't leave a half-made draft behind.
+		ctx2, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		c.do(ctx2, http.MethodDelete, msg, nil, nil)
+		return err
+	}
+	for _, f := range files {
+		if err := c.attach(ctx, msg, f); err != nil {
+			return fail(fmt.Errorf("attaching %s: %w", f.Name, err))
+		}
+	}
+	if err := c.do(ctx, http.MethodPost, msg+"/send", nil, nil); err != nil {
+		return fail(err)
+	}
+	return nil
+}
+
+func (c *Client) attach(ctx context.Context, msg string, f File) error {
+	if len(f.Data) <= smallAttach {
+		return c.do(ctx, http.MethodPost, msg+"/attachments", map[string]any{
+			"@odata.type": "#microsoft.graph.fileAttachment", "name": f.Name, "contentType": f.Type,
+			"contentBytes": base64.StdEncoding.EncodeToString(f.Data),
+		}, nil)
+	}
+	var sess struct {
+		UploadURL string `json:"uploadUrl"`
+	}
+	err := c.do(ctx, http.MethodPost, msg+"/attachments/createUploadSession", map[string]any{
+		"AttachmentItem": map[string]any{"attachmentType": "file", "name": f.Name, "size": len(f.Data), "contentType": f.Type},
+	}, &sess)
+	if err != nil {
+		return err
+	}
+	if !strings.HasPrefix(sess.UploadURL, "https://") && !strings.HasPrefix(sess.UploadURL, c.base()) {
+		return fmt.Errorf("odd upload URL")
+	}
+	hc := c.HTTP
+	if hc == nil {
+		hc = http.DefaultClient
+	}
+	const chunk = 16 * 320 << 10 // 5 MiB: chunks must be multiples of 320 KiB
+	for at := 0; at < len(f.Data); at += chunk {
+		end := min(at+chunk, len(f.Data))
+		// The upload URL carries its own authorisation: no bearer token.
+		req, err := http.NewRequestWithContext(ctx, http.MethodPut, sess.UploadURL, bytes.NewReader(f.Data[at:end]))
+		if err != nil {
+			return err
+		}
+		req.ContentLength = int64(end - at)
+		req.Header.Set("Content-Type", "application/octet-stream")
+		req.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", at, end-1, len(f.Data)))
+		resp, err := hc.Do(req)
+		if err != nil {
+			return err
+		}
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+		resp.Body.Close()
+		if resp.StatusCode >= 300 {
+			return fmt.Errorf("upload: %d", resp.StatusCode)
+		}
+	}
+	return nil
+}
+
+func (c *Client) base() string {
+	if c.Base != "" {
+		return c.Base
+	}
+	return DefaultBase
 }

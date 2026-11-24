@@ -425,7 +425,8 @@ void App::sendDraft() {
     sendReq_ = nextReq_++;
     json d = {{"from", draft_.from},           {"to", draft_.to},     {"cc", draft_.cc},
               {"bcc", draft_.showBcc ? draft_.bcc : ""}, {"subject", draft_.subject}, {"body", draft_.body},
-              {"inReplyTo", draft_.inReplyTo}, {"references", draft_.references}};
+              {"inReplyTo", draft_.inReplyTo}, {"references", draft_.references},
+              {"attachments", draft_.attachments}};
     request({{"t", "send"}, {"draft", d}, {"req", sendReq_}});
 }
 
@@ -449,7 +450,7 @@ void App::saveDraft(bool now) {
     json j = {{"kind", draft_.kind},       {"from", draft_.from},       {"to", draft_.to},
               {"cc", draft_.cc},           {"bcc", draft_.bcc},         {"showBcc", draft_.showBcc},
               {"subject", draft_.subject}, {"body", draft_.body},       {"inReplyTo", draft_.inReplyTo},
-              {"references", draft_.references}};
+              {"references", draft_.references}, {"attachments", draft_.attachments}};
     std::wstring tmp = path + L".tmp";
     {
         std::ofstream f(tmp, std::ios::binary);
@@ -477,9 +478,40 @@ void App::loadDraft() {
         draft_.body = str(j, "body");
         draft_.inReplyTo = str(j, "inReplyTo");
         draft_.references = strings(j["references"]);
+        draft_.attachments = strings(j["attachments"]);
         if (draft_.kind.empty()) draft_.kind = "New message";
     } catch (...) {
     }
+}
+
+void App::attach(const std::vector<std::wstring>& paths) {
+    for (const auto& w : paths) {
+        if (FileSize(w) < 0) {
+            note_ = "Can't attach " + Narrow(BaseName(w)) + ": folders and missing files can't go.";
+            noteUntil_ = ImGui::GetTime() + 6;
+            continue;
+        }
+        std::string p = Narrow(w);
+        if (std::find(draft_.attachments.begin(), draft_.attachments.end(), p) == draft_.attachments.end())
+            draft_.attachments.push_back(p);
+    }
+    draft_.edited = draft_.dirty = true;
+    draft_.changedAt = ImGui::GetTime();
+    draft_.error.clear();
+}
+
+void App::DropFiles(const std::vector<std::wstring>& paths) {
+    if (paths.empty()) return;
+    if (!draft_.open) newMessage();
+    draft_.shown = true;
+    attach(paths);
+}
+
+void App::OpenMessage(int64_t id) {
+    if (!id) return;
+    if (!demo_) ShowWindow();  // test runs never take the foreground
+    select(0);  // so the same message opens afresh
+    select(id);
 }
 
 bool App::inView(const std::string& account, const std::string& folder) const {
@@ -621,6 +653,11 @@ void App::onEvent(const json& e) {
         discardDraft();
         note_ = "Sent to " + to;
         noteUntil_ = ImGui::GetTime() + 6;
+    } else if (t == "saved") {
+        std::wstring path = Widen(str(e, "path"));
+        std::wstring dir = path.substr(0, path.size() - BaseName(path).size());
+        note_ = "Saved " + Narrow(BaseName(path)) + " in " + Narrow(dir);
+        noteUntil_ = ImGui::GetTime() + 6;
     } else if (t == "code") {
         code_ = {str(e, "from"), str(e, "code"), ImGui::GetTime() + 600};
     } else if (t == "newmail") {
@@ -645,6 +682,7 @@ void App::onEvent(const json& e) {
             reader_->Clear();
         } else {
             note_ = str(e, "error");
+            if (!note_.empty() && note_[0] >= 'a' && note_[0] <= 'z') note_[0] -= 'a' - 'A';
             noteUntil_ = ImGui::GetTime() + 8;
         }
     } else if (t == "stopped") {
@@ -656,6 +694,23 @@ void App::onEvent(const json& e) {
 }
 
 void App::Pump() {
+    // File dialogs run here, between frames: they're modal, and a frame
+    // mustn't be left half-drawn while one is open.
+    if (pickFiles_) {
+        pickFiles_ = false;
+        auto paths = PickFiles(hwnd_);
+        if (!paths.empty()) attach(paths);
+    }
+    if (saveAttachment_ >= 0) {
+        int index = saveAttachment_;
+        saveAttachment_ = -1;
+        for (const auto& a : body_.attachments)
+            if (a.index == index) {
+                std::wstring path = PickSavePath(hwnd_, Widen(a.name));
+                if (!path.empty())
+                    request({{"t", "save"}, {"id", body_.id}, {"index", index}, {"path", Narrow(path)}});
+            }
+    }
     std::vector<json> events;
     if (engine_) engine_->Drain(events);
     for (const auto& e : events) onEvent(e);
@@ -680,7 +735,8 @@ void App::Pump() {
 // (the third row), "folder 0 Archive", "unified", "remote", "waitload",
 // "shot C:\\path.png", "mouse x y", "down", "up" (ImGui only), "new",
 // "reply", "replyall", "set to|cc|subject|body text" (body: put before the
-// quote), "send", "discard", "waitdraft", "quit".
+// quote), "attach C:\\file", "saveatt <index> C:\\path", "send", "discard",
+// "waitdraft", "quit".
 void App::testStep() {
     if (step_ >= steps_.size()) return;
     double now = ImGui::GetTime();
@@ -748,6 +804,16 @@ void App::testStep() {
         }
     } else if (cmd == "send") {
         sendDraft();
+    } else if (cmd == "attach") {
+        std::string path;
+        std::getline(ss >> std::ws, path);
+        attach({Widen(path)});
+    } else if (cmd == "saveatt") {
+        int index = 0;
+        std::string path;
+        ss >> index;
+        std::getline(ss >> std::ws, path);
+        request({{"t", "save"}, {"id", body_.id}, {"index", index}, {"path", path}});
     } else if (cmd == "discard") {
         discardDraft();
     } else if (cmd == "remote") {
@@ -1375,7 +1441,20 @@ void App::drawReading(float x, float y, float w, float h) {
                 cx = x + pad;
             }
             ImVec2 at(cx, ImGui::GetCursorScreenPos().y);
-            ImGui::GetWindowDrawList()->AddRectFilled(at, ImVec2(at.x + cw, at.y + ts.y + 10 * k), U32(p.input), 4 * k);
+            ImVec2 save = ImGui::GetCursorScreenPos();
+            ImGui::SetCursorScreenPos(at);
+            ImGui::PushID(a.index);
+            bool clicked = ImGui::InvisibleButton("##att", ImVec2(cw, ts.y + 10 * k));
+            bool hov = ImGui::IsItemHovered();
+            ImGui::PopID();
+            ImGui::SetCursorScreenPos(save);
+            if (clicked) saveAttachment_ = a.index;
+            if (hov) {
+                ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                ImGui::SetTooltip("Save %s\xE2\x80\xA6", a.name.c_str());
+            }
+            ImGui::GetWindowDrawList()->AddRectFilled(at, ImVec2(at.x + cw, at.y + ts.y + 10 * k), U32(hov ? p.hover : p.input),
+                                                      4 * k);
             ImGui::GetWindowDrawList()->AddText(ImVec2(at.x + 9 * k, at.y + 5 * k), U32(p.text), label.c_str());
             cx += cw + 6 * k;
         }
@@ -1448,9 +1527,14 @@ void App::drawCompose(float x, float y, float w, float h) {
     ImGui::PushFont(fonts_.regular, kSmall + 1);
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12 * k, 5 * k));
     std::string sendLabel = std::string(icon::Send) + "  " + (draft_.sending ? "Sending\xE2\x80\xA6" : "Send");
+    std::string attachLabel = std::string(icon::Attach) + "  Attach";
     float sw = ImGui::CalcTextSize(sendLabel.c_str()).x + 24 * k, dw = ImGui::CalcTextSize("Discard").x + 24 * k;
-    ImGui::SetCursorPos(ImVec2(x + w - pad - sw - dw - 6 * k, y + 14 * k));
+    float aw = ImGui::CalcTextSize(attachLabel.c_str()).x + 24 * k;
+    ImGui::SetCursorPos(ImVec2(x + w - pad - sw - dw - aw - 12 * k, y + 14 * k));
     ImGui::BeginDisabled(draft_.sending || draft_.loading);
+    if (ImGui::Button(attachLabel.c_str(), ImVec2(aw, 0))) pickFiles_ = true;
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) ImGui::SetTooltip("Attach files (or drop them on the window)");
+    ImGui::SameLine(0, 6 * k);
     if (ImGui::Button("Discard", ImVec2(dw, 0))) ImGui::OpenPopup("##discard");
     ImGui::SameLine(0, 6 * k);
     ImGui::PushStyleColor(ImGuiCol_Button, p.accent);
@@ -1531,6 +1615,51 @@ void App::drawCompose(float x, float y, float w, float h) {
         field("Bcc", "##bcc", draft_.bcc, 0, fieldW);
     }
     field("Subject", "##subject", draft_.subject, 0, fieldW);
+
+    // Attached files, as chips with a cross to take each off.
+    if (!draft_.attachments.empty()) {
+        ImGui::PushFont(fonts_.regular, kSmall + 1);
+        float cx = x + pad + labelW, chipH = ImGui::GetFontSize() + 12 * k;
+        int64_t total = 0;
+        int remove = -1;
+        label("Files");
+        for (size_t i = 0; i < draft_.attachments.size(); i++) {
+            std::wstring wp = Widen(draft_.attachments[i]);
+            int64_t size = FileSize(wp);
+            total += std::max<int64_t>(size, 0);
+            std::string text = std::string(icon::Attach) + " " + Narrow(BaseName(wp)) + "  " +
+                               (size < 0 ? std::string("missing") : Size(size));
+            float tw = ImGui::CalcTextSize(text.c_str()).x, cw = tw + 40 * k;
+            if (cx + cw > x + w - pad && cx > x + pad + labelW) {
+                cx = x + pad + labelW;
+                fy += chipH + 6 * k;
+            }
+            ImVec2 a(cx, fy), b(cx + cw, fy + chipH);
+            dl->AddRectFilled(a, b, U32(p.input), 4 * k);
+            dl->AddText(ImVec2(a.x + 9 * k, a.y + 6 * k), U32(size < 0 ? p.bad : p.text), text.c_str());
+            ImGui::SetCursorScreenPos(ImVec2(b.x - 24 * k, a.y + 2 * k));
+            ImGui::PushID(int(i));
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
+            if (ImGui::Button("\xC3\x97", ImVec2(20 * k, chipH - 4 * k))) remove = int(i);
+            ImGui::PopStyleVar();
+            ImGui::PopStyleColor();
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Take it off");
+            ImGui::PopID();
+            cx += cw + 6 * k;
+        }
+        fy += chipH + 6 * k;
+        if (total > (25 << 20)) {
+            ImGui::SetCursorScreenPos(ImVec2(x + pad + labelW, fy));
+            ImGui::TextColored(p.bad, "These come to %s: one message can carry 25 MB.", Size(total).c_str());
+            fy += ImGui::GetFontSize() + 6 * k;
+        }
+        ImGui::PopFont();
+        if (remove >= 0) {
+            draft_.attachments.erase(draft_.attachments.begin() + remove);
+            changed = true;
+        }
+    }
 
     // The text.
     fy += 6 * k;

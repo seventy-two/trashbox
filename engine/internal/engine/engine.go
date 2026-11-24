@@ -17,6 +17,8 @@
 //	draft id all                           -> {"t":"draft","draft":{from,to,cc,bcc,subject,body,inReplyTo,references}}
 //	   a reply to message id (all: to everyone on it), from its account
 //	send draft                             -> {"t":"sent","account"} once the server has it
+//	   draft.attachments are paths of files on this PC
+//	save id index path                     -> {"t":"saved","path"}: writes attachment index to path
 //	sync                                   -> checks every account now
 //	quit
 //
@@ -35,6 +37,9 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/url"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -99,6 +104,24 @@ type Engine struct {
 	// OnCode, if set, is called (on its own goroutine) for each sign-in
 	// code found in new mail. Set it before Run.
 	OnCode func(Code)
+
+	// Inbox, if set, is given the unread mail of the last two days
+	// whenever that changes, and every 10 minutes anyway (so whoever
+	// shows it knows it's current). Set it before Run.
+	Inbox    func(ctx context.Context, mail []NewMail) error
+	inboxDue chan struct{}
+}
+
+// NewMail is a recent unread message, as Inbox is given it.
+type NewMail struct {
+	Key     string    `json:"key"` // account:id, the same for as long as the cache lives
+	Account string    `json:"account"`
+	From    string    `json:"from"`
+	Subject string    `json:"subject"`
+	Date    time.Time `json:"date"`
+	// URL opens the account's webmail; it carries ?tb=<id>, which trashbox
+	// reads when started with it, to open the message itself.
+	URL string `json:"url"`
 }
 
 type account struct {
@@ -117,7 +140,8 @@ type account struct {
 
 // New makes an engine. Output goes to out as JSON lines.
 func New(c *cache.Cache, viewDir string, out io.Writer, logger *log.Logger, s Settings, accounts []Account) *Engine {
-	e := &Engine{cache: c, viewDir: viewDir, log: logger, settings: s, out: json.NewEncoder(out), byID: map[string]*account{}}
+	e := &Engine{cache: c, viewDir: viewDir, log: logger, settings: s, out: json.NewEncoder(out), byID: map[string]*account{},
+		inboxDue: make(chan struct{}, 1)}
 	for _, a := range accounts {
 		acc := &account{Account: a, e: e, kick: make(chan struct{}, 1), status: "connecting"}
 		e.accounts = append(e.accounts, acc)
@@ -141,6 +165,13 @@ func (e *Engine) Run(ctx context.Context, in io.Reader) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var wg sync.WaitGroup
+	if e.Inbox != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			e.reportInbox(ctx)
+		}()
+	}
 	for _, a := range e.accounts {
 		wg.Add(1)
 		go func() {
@@ -208,6 +239,8 @@ func (e *Engine) handle(ctx context.Context, cmd map[string]any) {
 		err = e.cmdDraft(ctx, cmd, reply)
 	case "send":
 		err = e.cmdSend(ctx, cmd, reply)
+	case "save":
+		err = e.cmdSave(ctx, cmd, reply)
 	case "sync":
 		for _, a := range e.accounts {
 			a.poke()
@@ -445,6 +478,114 @@ func (e *Engine) cmdSend(ctx context.Context, cmd map[string]any, reply func(map
 	return nil
 }
 
+func (e *Engine) cmdSave(ctx context.Context, cmd map[string]any, reply func(map[string]any)) error {
+	path := str(cmd, "path")
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("save where? %q isn't a full path", path)
+	}
+	_, p, err := e.parsed(ctx, num(cmd, "id"))
+	if err != nil {
+		return err
+	}
+	data, ok := p.AttachmentData(int(num(cmd, "index")))
+	if !ok {
+		return errors.New("that attachment isn't in the message")
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return fmt.Errorf("couldn't save it: %w", err)
+	}
+	reply(map[string]any{"t": "saved", "path": path})
+	return nil
+}
+
+// ---- new mail for kitchensink ----
+
+func (e *Engine) inboxChanged() {
+	select {
+	case e.inboxDue <- struct{}{}:
+	default:
+	}
+}
+
+// reportInbox hands the recent unread mail to Inbox when it changes,
+// gathering bursts of changes, and every 10 minutes regardless.
+func (e *Engine) reportInbox(ctx context.Context) {
+	var last string
+	var lastAt time.Time
+	tick := time.NewTicker(time.Minute)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-e.inboxDue:
+			select { // a burst of syncs settles first
+			case <-ctx.Done():
+				return
+			case <-time.After(e.settings.Debounce + 2*time.Second):
+			}
+		case <-tick.C:
+			if time.Since(lastAt) < 10*time.Minute {
+				continue
+			}
+		}
+		mail, err := e.recentUnread(time.Now())
+		if err != nil {
+			e.log.Printf("new mail for kitchensink: %v", err)
+			continue
+		}
+		b, _ := json.Marshal(mail)
+		if string(b) == last && time.Since(lastAt) < 10*time.Minute {
+			continue
+		}
+		if err := e.Inbox(ctx, mail); err != nil {
+			e.log.Printf("new mail for kitchensink: %v", err)
+			continue
+		}
+		last, lastAt = string(b), time.Now()
+	}
+}
+
+// recentUnread is every inbox's unread mail from the last two days, newest
+// first, at most 30.
+func (e *Engine) recentUnread(now time.Time) ([]NewMail, error) {
+	ms, err := e.cache.List(cache.Query{Unified: true, Limit: 300})
+	if err != nil {
+		return nil, err
+	}
+	out := []NewMail{}
+	cutoff := now.Add(-48 * time.Hour).Unix()
+	for _, m := range ms {
+		if m.Date < cutoff || len(out) == 30 {
+			break
+		}
+		if m.Seen {
+			continue
+		}
+		from := m.FromName
+		if from == "" {
+			from = m.FromAddr
+		}
+		kind := ""
+		if a := e.byID[m.Account]; a != nil {
+			kind = a.Kind
+		}
+		out = append(out, NewMail{
+			Key: fmt.Sprintf("%s:%d", m.Account, m.ID), Account: m.Account, From: from, Subject: m.Subject,
+			Date: time.Unix(m.Date, 0), URL: webmail(kind, m.Account, m.ID),
+		})
+	}
+	return out, nil
+}
+
+// webmail is a link to the account's webmail carrying the message's ID.
+func webmail(kind, account string, id int64) string {
+	if kind == "gmail" {
+		return fmt.Sprintf("https://mail.google.com/mail/u/%s/?tb=%d#inbox", url.PathEscape(account), id)
+	}
+	return fmt.Sprintf("https://outlook.live.com/mail/0/?tb=%d", id)
+}
+
 func (e *Engine) cmdSeen(ctx context.Context, cmd map[string]any) error {
 	seen, _ := cmd["seen"].(bool)
 	raw, _ := cmd["ids"].([]any)
@@ -476,6 +617,7 @@ func (e *Engine) cmdSeen(ctx context.Context, cmd map[string]any) error {
 			return err
 		}
 		e.Emit(map[string]any{"t": "changed", "account": k.account, "folder": k.folder})
+		e.inboxChanged()
 		if fs, err := e.folderList(k.account); err == nil {
 			e.Emit(map[string]any{"t": "folders", "account": k.account, "folders": fs})
 		}
@@ -728,6 +870,7 @@ func (a *account) syncFolder(ctx context.Context, folder string) ([]int64, error
 	}
 	if len(d.New)+len(d.Flags)+len(d.Removed) > 0 {
 		a.e.Emit(map[string]any{"t": "changed", "account": a.ID, "folder": folder})
+		a.e.inboxChanged()
 	}
 	if f.State == "" {
 		return nil, nil

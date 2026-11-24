@@ -71,7 +71,12 @@ func providers(st *store.Store, cfg store.Config, logger *log.Logger) []engine.A
 			// Graph reads the recipients from the message, so Bcc goes in it
 			// (Exchange takes it out again before delivery).
 			send = func(ctx context.Context, m compose.Outgoing) error {
-				return gc.SendMIME(ctx, append([]byte(m.BccHeader), m.Raw...))
+				files := make([]graph.File, len(m.Files))
+				for i, f := range m.Files {
+					files[i] = graph.File{Name: f.Name, Type: f.Type, Data: f.Data}
+				}
+				bcc := []byte(m.BccHeader)
+				return gc.Send(ctx, append(bcc, m.Raw...), append(bcc, m.Text...), files)
 			}
 		case store.Gmail:
 			pass, err := st.Secret(a)

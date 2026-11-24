@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "app.h"
 #include "imgui.h"
@@ -28,6 +29,7 @@ namespace {
 
 constexpr UINT WM_APP_WAKE = WM_APP + 1;
 constexpr UINT WM_APP_SHOW = WM_APP + 3;  // a second start
+constexpr UINT WM_APP_OPEN = WM_APP + 7;  // a second start with a message to open (wParam = its ID)
 constexpr UINT WM_APP_QUIT = WM_APP + 5;  // from the settings menu
 constexpr UINT WM_APP_TRAY = WM_APP + 6;
 constexpr UINT kTrayOpen = 1, kTrayQuit = 2;
@@ -287,6 +289,23 @@ LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_APP_SHOW:
         if (app) app->ShowWindow();
         return 0;
+    case WM_APP_OPEN:
+        if (app) app->OpenMessage(int64_t(wParam));
+        return 0;
+    case WM_DROPFILES: {
+        HDROP drop = reinterpret_cast<HDROP>(wParam);
+        std::vector<std::wstring> paths;
+        UINT n = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+        for (UINT i = 0; i < n; i++) {
+            UINT len = DragQueryFileW(drop, i, nullptr, 0);
+            std::wstring p(len, L'\0');
+            DragQueryFileW(drop, i, p.data(), len + 1);
+            paths.push_back(p);
+        }
+        DragFinish(drop);
+        if (app) app->DropFiles(paths);
+        return 0;
+    }
     case WM_APP_TRAY:
         if (LOWORD(lParam) == WM_LBUTTONUP || LOWORD(lParam) == WM_LBUTTONDBLCLK) {
             if (IsWindowVisible(h) && !IsIconic(h) && GetForegroundWindow() == h) ShowWindow(h, SW_HIDE);
@@ -324,11 +343,16 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
             force = true;
         }
     }
+    // A link from kitchensink's New mail panel: webmail's address with
+    // ?tb=<id> for trashbox, which opens that message.
+    int64_t openId = 0;
+    if (const wchar_t* p = wcsstr(cmdLine, L"tb=")) openId = _wtoi64(p + 3);
     HANDLE mutex = CreateMutexW(nullptr, TRUE, mutexName.c_str());
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         if (HWND other = FindWindowW(kClassName, nullptr); other && !startHidden) {
             AllowSetForegroundWindow(ASFW_ANY);
-            PostMessageW(other, WM_APP_SHOW, 0, 0);
+            if (openId > 0) PostMessageW(other, WM_APP_OPEN, WPARAM(openId), 0);
+            else PostMessageW(other, WM_APP_SHOW, 0, 0);
         }
         return 0;
     }
@@ -382,10 +406,14 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     iconPlain = (HICON)LoadImageW(inst, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON, traySize, traySize, 0);
     iconUnread = unreadIcon(iconPlain, traySize);
     if (!testing) addTray();  // a test run has no tray icon to come and go
+    DragAcceptFiles(hwnd, TRUE);
     CoCreateInstance(CLSID_TaskbarList, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&taskbar));
     if (taskbar) taskbar->HrInit();
 
     if (testing) {
+        // Windows can't hand a test window the foreground at all, even when
+        // the window in front closes and it's next in line.
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, GetWindowLongPtrW(hwnd, GWL_EXSTYLE) | WS_EX_NOACTIVATE);
         // Test runs must never take the foreground (a game may be in front).
         // ShowWindow's first call obeys the launcher's "show normally", which
         // activates; SetWindowPos doesn't. Bottom of the stack, too.
@@ -395,13 +423,15 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
         ShowWindow(hwnd, SW_SHOW);
         UpdateWindow(hwnd);
     }
+    if (openId > 0) app->OpenMessage(openId);
 
     bool running = true;
     while (running) {
         // Behind a fullscreen game nothing is drawn: presenting frames
         // there made the game's frame pacing hitch. Checked each second
         // so the window catches up soon after the game's gone.
-        bool visible = IsWindowVisible(hwnd) && !IsIconic(hwnd) && !fullscreenInFront(hwnd);
+        // Test runs (off-screen) keep drawing, or their steps would stall.
+        bool visible = IsWindowVisible(hwnd) && !IsIconic(hwnd) && (testing || !fullscreenInFront(hwnd));
         bool front = visible && GetForegroundWindow() == hwnd;
         DWORD timeout = framesWanted > 0                    ? 0
                         : visible && app->Animating() ? (front ? 33 : 100)

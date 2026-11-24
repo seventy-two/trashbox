@@ -67,6 +67,7 @@ struct Draft {
     std::string kind;    // "New message", "Reply", "Reply all"
     std::string from, to, cc, bcc, subject, body, inReplyTo;
     std::vector<std::string> references;
+    std::vector<std::string> attachments;  // paths (UTF-8)
     bool showBcc = false;
     bool loading = false;  // waiting for the engine to write the reply
     bool sending = false;
@@ -103,6 +104,11 @@ public:
     void ShowWindow();
     int Unread() const;  // unread in every inbox
     int New() const { return newCount_; }  // new mail since the window was last in front
+    // DropFiles attaches files dropped on the window (to the draft, or a
+    // new message if there isn't one).
+    void DropFiles(const std::vector<std::wstring>& paths);
+    // OpenMessage shows a message by its cache ID (a kitchensink link).
+    void OpenMessage(int64_t id);
 
 private:
     void onEvent(const nlohmann::json& e);
@@ -128,6 +134,9 @@ private:
     void drawList(float x, float y, float w, float h);
     void drawReading(float x, float y, float w, float h);
     void drawCompose(float x, float y, float w, float h);
+    void attach(const std::vector<std::wstring>& paths);
+    bool pickFiles_ = false;     // the Attach dialog is due (run between frames)
+    int saveAttachment_ = -1;    // the Save dialog is due for this attachment
     void drawDivider(float left, float x, float y, float h, float room, float minX, float maxX);
     bool iconButton(const char* glyph, const char* tip, float size = 30, bool danger = false);
     bool titleButton(const char* glyph, const char* tip, float x, float w, float h, bool danger = false);

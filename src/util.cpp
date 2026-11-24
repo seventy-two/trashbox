@@ -1,6 +1,8 @@
 #include "util.h"
 
 #include <shellapi.h>
+#include <shlobj.h>
+#include <shobjidl.h>
 #include <wincodec.h>
 
 #include <ctime>
@@ -147,6 +149,73 @@ bool SaveWindowPng(HWND hwnd, const std::wstring& path) {
     }
     DeleteObject(bmp);
     return saved;
+}
+
+std::vector<std::wstring> PickFiles(HWND owner) {
+    std::vector<std::wstring> out;
+    IFileOpenDialog* d = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&d)))) return out;
+    DWORD opts = 0;
+    d->GetOptions(&opts);
+    d->SetOptions(opts | FOS_ALLOWMULTISELECT | FOS_FILEMUSTEXIST | FOS_FORCEFILESYSTEM);
+    d->SetTitle(L"Attach files");
+    d->SetOkButtonLabel(L"Attach");
+    IShellItemArray* items = nullptr;
+    if (SUCCEEDED(d->Show(owner)) && SUCCEEDED(d->GetResults(&items))) {
+        DWORD n = 0;
+        items->GetCount(&n);
+        for (DWORD i = 0; i < n; i++) {
+            IShellItem* it = nullptr;
+            PWSTR path = nullptr;
+            if (SUCCEEDED(items->GetItemAt(i, &it)) && SUCCEEDED(it->GetDisplayName(SIGDN_FILESYSPATH, &path))) {
+                out.push_back(path);
+                CoTaskMemFree(path);
+            }
+            if (it) it->Release();
+        }
+        items->Release();
+    }
+    d->Release();
+    return out;
+}
+
+std::wstring PickSavePath(HWND owner, const std::wstring& name) {
+    std::wstring out;
+    IFileSaveDialog* d = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_FileSaveDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&d)))) return out;
+    DWORD opts = 0;
+    d->GetOptions(&opts);
+    d->SetOptions(opts | FOS_OVERWRITEPROMPT | FOS_FORCEFILESYSTEM);
+    d->SetFileName(name.c_str());
+    // Downloads to start with; after that Windows remembers where you went.
+    IShellItem* dl = nullptr;
+    if (SUCCEEDED(SHGetKnownFolderItem(FOLDERID_Downloads, KF_FLAG_DEFAULT, nullptr, IID_PPV_ARGS(&dl)))) {
+        d->SetDefaultFolder(dl);
+        dl->Release();
+    }
+    IShellItem* it = nullptr;
+    if (SUCCEEDED(d->Show(owner)) && SUCCEEDED(d->GetResult(&it))) {
+        PWSTR path = nullptr;
+        if (SUCCEEDED(it->GetDisplayName(SIGDN_FILESYSPATH, &path))) {
+            out = path;
+            CoTaskMemFree(path);
+        }
+        it->Release();
+    }
+    d->Release();
+    return out;
+}
+
+int64_t FileSize(const std::wstring& path) {
+    WIN32_FILE_ATTRIBUTE_DATA a{};
+    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &a)) return -1;
+    if (a.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) return -1;
+    return (int64_t(a.nFileSizeHigh) << 32) | a.nFileSizeLow;
+}
+
+std::wstring BaseName(const std::wstring& path) {
+    size_t i = path.find_last_of(L"\\/");
+    return i == std::wstring::npos ? path : path.substr(i + 1);
 }
 
 }  // namespace tb

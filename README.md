@@ -30,6 +30,13 @@ and Gmail (IMAP).
   and thread properly (In-Reply-To and References). Outlook sends through
   Graph and Gmail over SMTP, and both keep a copy in Sent. The draft
   survives reading other mail, and a restart. Keys: R, A, N; Ctrl+Enter sends.
+- **Attachments.** Attach files with the Attach button or by dropping them
+  on the window (up to 25 MB a message; big Outlook ones go up in chunks).
+  Click an attachment on a message to save it.
+- **A feed for a dashboard.** Optionally, the unread mail of the last two
+  days is posted to a webhook whenever it changes
+  (`trashbox-engine spike set-mail-hook`, URL on stdin), and
+  `trashbox.exe "<url>?tb=<id>"` opens a message from a link.
 - **Small.** Mail is opened read when you open it, a draggable divider sets
   the list and reading pane sizes, and it sits in the tray when closed.
 
@@ -37,8 +44,8 @@ and Gmail (IMAP).
 | --- | --- | --- |
 | ![](docs/plain.png) | ![](docs/blocked.png) | ![](docs/code.png) |
 
-Work in progress: reading, replying and writing work. Archive, delete,
-search, forwarding and saving attachments are next.
+Work in progress: reading, replying, writing and attachments work.
+Archive, delete, search and forwarding are next.
 
 ## Accounts
 

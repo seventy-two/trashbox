@@ -32,6 +32,9 @@ import (
 // codesHook is where kitchensink's codes hook URL is kept among the secrets.
 var codesHook = store.Account{Kind: "hook", Address: "kitchensink-codes"}
 
+// mailHook is where kitchensink's new-mail hook URL is kept.
+var mailHook = store.Account{Kind: "hook", Address: "kitchensink-mail"}
+
 const usage = `trashbox-engine                 run for the window (JSON lines on stdin/stdout)
 trashbox-engine -demo           the same with made-up accounts (set TRASHBOX_DATA to a test folder)
 trashbox-engine spike <command> [flags]
@@ -44,6 +47,7 @@ trashbox-engine spike <command> [flags]
   gmail-add                       add a Gmail account with an app password
   gmail-check   [-account a]
   gmail-send    [-account a] [-to b]
+  set-codes-hook / set-mail-hook   kitchensink hook URL on stdin
   send-test     [-account a] [-to b] [-bcc c]   send through the window's own path (compose + provider)
 `
 
@@ -109,6 +113,15 @@ func serve(demoMode bool) error {
 			logger.Printf("sent a code from %s to kitchensink", c.From)
 		}
 	}
+	// Recent unread mail goes to kitchensink's panel, if its hook is set.
+	if url, err := st.Secret(mailHook); err == nil && url != "" && !demoMode {
+		poster := hook.Poster{URL: url, Tries: 2}
+		e.Inbox = func(ctx context.Context, mail []engine.NewMail) error {
+			ctx, cancel := context.WithTimeout(ctx, time.Minute)
+			defer cancel()
+			return poster.Post(ctx, map[string]any{"mail": mail})
+		}
+	}
 	e.Run(ctx, os.Stdin)
 	logger.Printf("stopped")
 	return nil
@@ -139,7 +152,7 @@ func spike(cmd string, args []string) error {
 		}
 		return nil
 
-	case "set-codes-hook":
+	case "set-codes-hook", "set-mail-hook":
 		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
 		if err != nil && line == "" {
 			return errors.New("no URL on stdin")
@@ -148,10 +161,14 @@ func spike(cmd string, args []string) error {
 		if !strings.HasPrefix(url, "https://") {
 			return errors.New("the hook URL must be https")
 		}
-		if err := st.SetSecret(codesHook, url); err != nil {
+		which := codesHook
+		if cmd == "set-mail-hook" {
+			which = mailHook
+		}
+		if err := st.SetSecret(which, url); err != nil {
 			return err
 		}
-		fmt.Println("Codes hook saved.")
+		fmt.Println("Hook saved.")
 		return nil
 
 	case "set-client-id":

@@ -1,6 +1,8 @@
 package compose
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -115,5 +117,51 @@ func TestBuildNeedsSomeone(t *testing.T) {
 	}
 	if _, err := Build(Draft{To: "a@x.com"}, time.Now()); err == nil {
 		t.Error("sent from no one")
+	}
+}
+
+func TestBuildWithAttachments(t *testing.T) {
+	dir := t.TempDir()
+	pdf := filepath.Join(dir, "Receipt é.pdf")
+	data := []byte("%PDF-1.4 " + strings.Repeat("x", 200))
+	os.WriteFile(pdf, data, 0o600)
+	blob := filepath.Join(dir, "notes")
+	os.WriteFile(blob, []byte("plain words"), 0o600)
+	d := Draft{From: "me@example.com", To: "a@x.com", Subject: "files", Body: "Here they are.", Attachments: []string{pdf, blob}}
+	o, err := Build(d, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(o.Files) != 2 || o.Files[0].Type != "application/pdf" || o.Files[1].Type != "text/plain" {
+		t.Fatalf("files %+v", o.Files)
+	}
+	if strings.Contains(string(o.Text), "multipart") || !strings.Contains(string(o.Raw), "multipart/mixed") {
+		t.Error("Text should be the plain message, Raw the multipart one")
+	}
+	m, err := mailparse.Parse(o.Raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(m.Text, "Here they are.") || len(m.Attachments) != 2 || m.Attachments[0].Name != "Receipt é.pdf" {
+		t.Fatalf("parsed back: %q %+v", m.Text, m.Attachments)
+	}
+	if got, _ := m.AttachmentData(0); string(got) != string(data) {
+		t.Error("the PDF didn't survive")
+	}
+	for _, line := range strings.Split(string(o.Raw), "\r\n") {
+		if len(line) > 78 {
+			t.Errorf("line too long: %q", line)
+		}
+	}
+}
+
+func TestBuildAttachmentProblems(t *testing.T) {
+	d := Draft{From: "me@example.com", To: "a@x.com", Attachments: []string{"/no/such/file.txt"}}
+	if _, err := Build(d, time.Now()); err == nil || !strings.Contains(err.Error(), "file.txt") {
+		t.Errorf("missing file: %v", err)
+	}
+	d.Attachments = []string{t.TempDir()}
+	if _, err := Build(d, time.Now()); err == nil || !strings.Contains(err.Error(), "folder") {
+		t.Errorf("folder: %v", err)
 	}
 }

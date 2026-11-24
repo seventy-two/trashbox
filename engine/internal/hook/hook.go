@@ -1,5 +1,5 @@
-// Package hook sends sign-in codes to kitchensink's codes monitor, whose
-// webhook URL (secret included) is stored encrypted like the other secrets.
+// Package hook posts to kitchensink's hooks (sign-in codes, new mail), whose
+// URLs (secret included) are stored encrypted like the other secrets.
 package hook
 
 import (
@@ -18,7 +18,7 @@ type Code struct {
 	Account string `json:"account"`
 }
 
-// Poster posts codes to one URL.
+// Poster posts JSON to one URL.
 type Poster struct {
 	URL   string
 	HTTP  *http.Client  // defaults to one with a 15 s timeout
@@ -26,10 +26,13 @@ type Poster struct {
 	Wait  time.Duration // between tries; 15 s by default
 }
 
-// Post sends a code, trying again a few times if kitchensink can't be
+// Post sends v as JSON, trying again a few times if kitchensink can't be
 // reached. Errors never include the URL, which holds the secret.
-func (p Poster) Post(ctx context.Context, c Code) error {
-	body, _ := json.Marshal(c)
+func (p Poster) Post(ctx context.Context, v any) error {
+	body, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
 	hc := p.HTTP
 	if hc == nil {
 		hc = &http.Client{Timeout: 15 * time.Second}
@@ -52,12 +55,12 @@ func (p Poster) Post(ctx context.Context, c Code) error {
 		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.URL, bytes.NewReader(body))
 		if err != nil {
-			return fmt.Errorf("codes hook: bad URL")
+			return fmt.Errorf("hook: bad URL")
 		}
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := hc.Do(req)
 		if err != nil {
-			last = fmt.Errorf("codes hook: can't reach kitchensink")
+			last = fmt.Errorf("hook: can't reach kitchensink")
 			continue
 		}
 		resp.Body.Close()
@@ -65,9 +68,9 @@ func (p Poster) Post(ctx context.Context, c Code) error {
 		case resp.StatusCode < 300:
 			return nil
 		case resp.StatusCode >= 500:
-			last = fmt.Errorf("codes hook: kitchensink said %d", resp.StatusCode)
+			last = fmt.Errorf("hook: kitchensink said %d", resp.StatusCode)
 		default:
-			return fmt.Errorf("codes hook: kitchensink said %d", resp.StatusCode) // wrong secret etc.: retrying won't help
+			return fmt.Errorf("hook: kitchensink said %d", resp.StatusCode) // wrong secret etc.: retrying won't help
 		}
 	}
 	return last

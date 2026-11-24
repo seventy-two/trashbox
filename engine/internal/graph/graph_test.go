@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -103,5 +104,71 @@ func TestSendMIME(t *testing.T) {
 	})
 	if err := c.SendMIME(context.Background(), []byte(raw)); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSendLargeGoesThroughADraft(t *testing.T) {
+	big := bytes.Repeat([]byte("b"), 6<<20) // two chunks
+	var calls []string
+	var uploaded int
+	var srvURL string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.Method+" "+r.URL.Path)
+		switch {
+		case r.URL.Path == "/me/messages" && r.Method == http.MethodPost:
+			b, _ := io.ReadAll(r.Body)
+			if text, _ := base64.StdEncoding.DecodeString(string(b)); string(text) != "TEXT" {
+				t.Errorf("draft made from %q", text)
+			}
+			fmt.Fprint(w, `{"id":"d1"}`)
+		case r.URL.Path == "/me/messages/d1/attachments":
+			var a map[string]any
+			json.NewDecoder(r.Body).Decode(&a)
+			if a["name"] != "small.txt" {
+				t.Errorf("attachment %v", a["name"])
+			}
+		case r.URL.Path == "/me/messages/d1/attachments/createUploadSession":
+			fmt.Fprintf(w, `{"uploadUrl":"%s/upload/xyz"}`, srvURL)
+		case r.URL.Path == "/upload/xyz":
+			if r.Header.Get("Authorization") != "" {
+				t.Error("the upload URL got the bearer token")
+			}
+			n, _ := io.Copy(io.Discard, r.Body)
+			uploaded += int(n)
+		case r.URL.Path == "/me/messages/d1/send":
+			w.WriteHeader(http.StatusAccepted)
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	srvURL = srv.URL
+	c := &Client{Token: "tok", Base: srv.URL}
+	raw := make([]byte, mimeLimit+1)
+	err := c.Send(context.Background(), raw, []byte("TEXT"), []File{{Name: "small.txt", Type: "text/plain", Data: []byte("hi")}, {Name: "big.bin", Type: "application/octet-stream", Data: big}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uploaded != len(big) || calls[len(calls)-1] != "POST /me/messages/d1/send" {
+		t.Errorf("uploaded %d, calls %v", uploaded, calls)
+	}
+}
+
+func TestSendLargeCleansUpOnFailure(t *testing.T) {
+	deleted := false
+	c := fake(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/me/messages":
+			fmt.Fprint(w, `{"id":"d1"}`)
+		case r.Method == http.MethodDelete:
+			deleted = true
+		default:
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			fmt.Fprint(w, `{"error":{"code":"TooBig","message":"no"}}`)
+		}
+	})
+	err := c.Send(context.Background(), make([]byte, mimeLimit+1), []byte("T"), []File{{Name: "a", Data: []byte("x")}})
+	if err == nil || !deleted {
+		t.Errorf("err %v, draft deleted %v", err, deleted)
 	}
 }

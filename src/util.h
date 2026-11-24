@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace tb {
 
@@ -30,6 +31,16 @@ bool OpenExternal(const std::wstring& url);
 // CopySecret puts text on the clipboard, marked so Windows keeps it out of
 // clipboard history and cloud clipboard (for sign-in codes).
 void CopySecret(HWND owner, const std::string& text);
+
+// PickFiles asks for files to attach (several at once); empty if cancelled.
+std::vector<std::wstring> PickFiles(HWND owner);
+// PickSavePath asks where to save a file called name, starting in
+// Downloads; empty if cancelled.
+std::wstring PickSavePath(HWND owner, const std::wstring& name);
+// FileSize is a file's size, or -1 if it can't be read.
+int64_t FileSize(const std::wstring& path);
+// BaseName is the last part of a path.
+std::wstring BaseName(const std::wstring& path);
 
 // SaveWindowPng captures a window (child windows included) to a PNG, for
 // test screenshots.

@@ -406,3 +406,52 @@ func TestReplyAndSend(t *testing.T) {
 		t.Errorf("account without sending: %v", r)
 	}
 }
+
+func TestSaveAttachmentAndNewMail(t *testing.T) {
+	a := newFake(false)
+	now := time.Now()
+	a.add("a1", "Fresh", now.Add(-time.Hour))
+	a.add("a2", "Old", now.Add(-72*time.Hour))
+	got := make(chan []NewMail, 10)
+	h := start(t, fast, []Account{{ID: "a@x", Kind: "gmail", Provider: a}}, func(e *Engine) {
+		e.Inbox = func(_ context.Context, m []NewMail) error { got <- m; return nil }
+	})
+	var mail []NewMail
+	deadline := time.After(10 * time.Second)
+	for len(mail) == 0 {
+		select {
+		case mail = <-got:
+		case <-deadline:
+			t.Fatal("no new mail reported")
+		}
+	}
+	if len(mail) != 1 || mail[0].Subject != "Fresh" || !strings.Contains(mail[0].URL, "mail.google.com/mail/u/a@x/?tb=") {
+		t.Fatalf("new mail %+v", mail)
+	}
+
+	// Reading it takes it off the list.
+	var id int64
+	fmt.Sscanf(strings.TrimPrefix(mail[0].Key, "a@x:"), "%d", &id)
+	h.send(map[string]any{"t": "seen", "ids": []int64{id}, "seen": true})
+	for {
+		select {
+		case m := <-got:
+			if len(m) == 0 {
+				goto saved
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("reading it didn't clear it")
+		}
+	}
+saved:
+	// The fake's messages have no attachments.
+	path := filepath.Join(t.TempDir(), "x.pdf")
+	h.send(map[string]any{"t": "save", "id": id, "index": 0, "path": path, "req": 9})
+	if r := h.wait("save", func(m map[string]any) bool { return m["req"] == float64(9) }); r["t"] != "error" {
+		t.Errorf("saving a missing attachment: %v", r)
+	}
+	h.send(map[string]any{"t": "save", "id": id, "index": 0, "path": "relative.pdf", "req": 10})
+	if r := h.wait("save", func(m map[string]any) bool { return m["req"] == float64(10) }); r["t"] != "error" {
+		t.Errorf("saving to a relative path: %v", r)
+	}
+}
