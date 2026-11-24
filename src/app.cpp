@@ -444,6 +444,8 @@ void App::onEvent(const json& e) {
             if (!m || !m->seen) markSeen(body_.id, true);
         }
         reader_->Show(body_.url, body_.remote, paneRect_);
+    } else if (t == "code") {
+        code_ = {str(e, "from"), str(e, "code"), ImGui::GetTime() + 600};
     } else if (t == "newmail") {
         if (GetForegroundWindow() != hwnd_) newCount_++;
         note_ = "New: " + str(e, "from") + " \xE2\x80\x94 " + str(e, "subject");
@@ -687,6 +689,40 @@ void App::drawTitle(float width) {
         }
     } else if (syncing) ImGui::TextColored(p.muted, "Checking %d account%s\xE2\x80\xA6", syncing, syncing == 1 ? "" : "s");
     ImGui::PopFont();
+
+    // A sign-in code from new mail, centred, with a Copy button.
+    if (!code_.code.empty() && ImGui::GetTime() < code_.until) {
+        ImGui::PushFont(fonts_.regular, kBody);
+        std::string label = "Code from " + code_.from + ":";
+        float lw = ImGui::CalcTextSize(label.c_str()).x;
+        ImGui::PushFont(fonts_.bold, kBody + 2);
+        float cw = ImGui::CalcTextSize(code_.code.c_str()).x;
+        ImGui::PopFont();
+        float bw = 64 * k, total = lw + 8 * k + cw + 10 * k + bw + 26 * k;
+        float cx = std::max(170 * k, (width - total) / 2);
+        ImDrawList* tdl = ImGui::GetWindowDrawList();
+        tdl->AddRectFilled(ImVec2(cx - 10 * k, 5 * k), ImVec2(cx + total + 4 * k, h - 5 * k), U32(p.input), 4 * k);
+        float ty = (h - ImGui::GetFontSize()) / 2;
+        tdl->AddText(ImVec2(cx, ty), U32(p.muted), label.c_str());
+        ImGui::PushFont(fonts_.bold, kBody + 2);
+        tdl->AddText(ImVec2(cx + lw + 8 * k, (h - ImGui::GetFontSize()) / 2), U32(p.heading), code_.code.c_str());
+        ImGui::PopFont();
+        ImGui::SetCursorPos(ImVec2(cx + lw + 8 * k + cw + 10 * k, 8 * k));
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6 * k, 2 * k));
+        bool copied = ImGui::GetTime() - code_.copiedAt < 2;
+        if (ImGui::Button(copied ? "Copied" : "Copy", ImVec2(bw, h - 16 * k))) {
+            CopySecret(hwnd_, code_.code);
+            code_.copiedAt = ImGui::GetTime();
+        }
+        hot_.push_back({ImGui::GetItemRectMin(), ImGui::GetItemRectMax()});
+        ImGui::SameLine(0, 4 * k);
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+        if (ImGui::Button("\xC3\x97", ImVec2(20 * k, h - 16 * k))) code_ = {};
+        ImGui::PopStyleColor();
+        hot_.push_back({ImGui::GetItemRectMin(), ImGui::GetItemRectMax()});
+        ImGui::PopStyleVar();
+        ImGui::PopFont();
+    }
 
     // Full-height buttons, glyphs centred, like Windows' own.
     float bw = 46 * k;

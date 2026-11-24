@@ -85,6 +85,24 @@ bool OpenExternal(const std::wstring& url) {
     return INT_PTR(ShellExecuteW(nullptr, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL)) > 32;
 }
 
+void CopySecret(HWND owner, const std::string& text) {
+    std::wstring w = Widen(text);
+    if (!OpenClipboard(owner)) return;
+    EmptyClipboard();
+    if (HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, (w.size() + 1) * sizeof(wchar_t))) {
+        memcpy(GlobalLock(mem), w.c_str(), (w.size() + 1) * sizeof(wchar_t));
+        GlobalUnlock(mem);
+        if (!SetClipboardData(CF_UNICODETEXT, mem)) GlobalFree(mem);
+    }
+    if (UINT fmt = RegisterClipboardFormatW(L"ExcludeClipboardContentFromMonitorProcessing"))
+        if (HGLOBAL flag = GlobalAlloc(GMEM_MOVEABLE, sizeof(DWORD))) {
+            *static_cast<DWORD*>(GlobalLock(flag)) = 0;
+            GlobalUnlock(flag);
+            if (!SetClipboardData(fmt, flag)) GlobalFree(flag);
+        }
+    CloseClipboard();
+}
+
 bool SaveWindowPng(HWND hwnd, const std::wstring& path) {
     RECT r;
     GetClientRect(hwnd, &r);

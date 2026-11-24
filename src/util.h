@@ -27,6 +27,10 @@ std::string Size(int64_t bytes);
 // else is refused.
 bool OpenExternal(const std::wstring& url);
 
+// CopySecret puts text on the clipboard, marked so Windows keeps it out of
+// clipboard history and cloud clipboard (for sign-in codes).
+void CopySecret(HWND owner, const std::string& text);
+
 // SaveWindowPng captures a window (child windows included) to a PNG, for
 // test screenshots.
 bool SaveWindowPng(HWND hwnd, const std::wstring& path);

@@ -20,6 +20,7 @@
 // Unasked: {"t":"account"} (status changes), {"t":"folders"} (counts
 // changed), {"t":"changed","account","folder"} (the list should be
 // fetched again), {"t":"newmail","account","id","from","subject"},
+// {"t":"code","account","id","from","code"} (a sign-in code in new mail),
 // {"t":"error","req","error"}.
 package engine
 
@@ -32,10 +33,12 @@ import (
 	"io"
 	"log"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/seventy-two/trashbox/engine/internal/cache"
+	"github.com/seventy-two/trashbox/engine/internal/codes"
 	"github.com/seventy-two/trashbox/engine/internal/htmltext"
 	"github.com/seventy-two/trashbox/engine/internal/mailbox"
 	"github.com/seventy-two/trashbox/engine/internal/mailparse"
@@ -56,6 +59,12 @@ type Settings struct {
 var DefaultSettings = Settings{
 	Window: 60 * 24 * time.Hour, Poll: time.Minute, PushPoll: 5 * time.Minute,
 	Retry: 30 * time.Second, Debounce: time.Second, OlderPage: 100,
+}
+
+// Code is a sign-in code found in new mail.
+type Code struct {
+	Account, From, Code string
+	ID                  int64
 }
 
 // Account is one account to run.
@@ -80,6 +89,10 @@ type Engine struct {
 
 	viewMu sync.Mutex
 	views  []string // page folders written, oldest first
+
+	// OnCode, if set, is called (on its own goroutine) for each sign-in
+	// code found in new mail. Set it before Run.
+	OnCode func(Code)
 }
 
 type account struct {
@@ -679,6 +692,46 @@ func (a *account) announce(ids []int64) {
 			from = m.FromAddr
 		}
 		a.e.Emit(map[string]any{"t": "newmail", "account": a.ID, "id": id, "from": from, "subject": m.Subject})
+		// Codes go stale in minutes: only fresh mail is worth reading for one.
+		if time.Since(time.Unix(m.Date, 0)) < 15*time.Minute && codes.Looks(m.Subject, m.Snippet) {
+			go a.findCode(m, from)
+		}
+	}
+}
+
+// findCode reads a new message in full for a sign-in code.
+func (a *account) findCode(m cache.Message, from string) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	raw, ok, err := a.e.cache.Body(m.ID)
+	if err != nil {
+		return
+	}
+	if !ok {
+		if raw, err = a.Provider.Raw(ctx, m.Folder, m.RID); err != nil {
+			a.e.log.Printf("%s: reading %d for a code: %v", a.ID, m.ID, err)
+			return
+		}
+	}
+	parsed, err := mailparse.Parse(raw)
+	if err != nil {
+		return
+	}
+	if !ok {
+		a.e.cache.SaveBody(m.ID, raw, snippetOf(parsed))
+	}
+	text := parsed.Text
+	if strings.TrimSpace(text) == "" {
+		text = htmltext.Convert(parsed.HTML)
+	}
+	code := codes.Find(m.Subject, text)
+	if code == "" {
+		return
+	}
+	a.e.log.Printf("%s: sign-in code in message %d from %s", a.ID, m.ID, from) // never the code itself
+	a.e.Emit(map[string]any{"t": "code", "account": a.ID, "id": m.ID, "from": from, "code": code})
+	if a.e.OnCode != nil {
+		go a.e.OnCode(Code{Account: a.ID, From: from, Code: code, ID: m.ID})
 	}
 }
 

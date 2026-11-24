@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -21,10 +22,14 @@ import (
 
 	"github.com/seventy-two/trashbox/engine/internal/gmail"
 	"github.com/seventy-two/trashbox/engine/internal/graph"
+	"github.com/seventy-two/trashbox/engine/internal/hook"
 	"github.com/seventy-two/trashbox/engine/internal/msauth"
 	"github.com/seventy-two/trashbox/engine/internal/store"
 	"github.com/seventy-two/trashbox/engine/internal/winui"
 )
+
+// codesHook is where kitchensink's codes hook URL is kept among the secrets.
+var codesHook = store.Account{Kind: "hook", Address: "kitchensink-codes"}
 
 const usage = `trashbox-engine                 run for the window (JSON lines on stdin/stdout)
 trashbox-engine -demo           the same with made-up accounts (set TRASHBOX_DATA to a test folder)
@@ -89,6 +94,19 @@ func serve(demoMode bool) error {
 		accounts = demo.Accounts()
 	}
 	e := engine.New(c, filepath.Join(st.Dir, "view"), os.Stdout, logger, engine.DefaultSettings, accounts)
+	// Sign-in codes go on to kitchensink, if its hook is set (never in demo mode).
+	if url, err := st.Secret(codesHook); err == nil && url != "" && !demoMode {
+		poster := hook.Poster{URL: url}
+		e.OnCode = func(c engine.Code) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			if err := poster.Post(ctx, hook.Code{From: c.From, Code: c.Code, Account: c.Account}); err != nil {
+				logger.Printf("sending a code from %s to kitchensink: %v", c.From, err)
+				return
+			}
+			logger.Printf("sent a code from %s to kitchensink", c.From)
+		}
+	}
 	e.Run(ctx, os.Stdin)
 	logger.Printf("stopped")
 	return nil
@@ -116,6 +134,21 @@ func spike(cmd string, args []string) error {
 		for _, a := range cfg.Accounts {
 			fmt.Printf("  %-8s %s\n", a.Kind, a.Address)
 		}
+		return nil
+
+	case "set-codes-hook":
+		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+		if err != nil && line == "" {
+			return errors.New("no URL on stdin")
+		}
+		url := strings.TrimSpace(line)
+		if !strings.HasPrefix(url, "https://") {
+			return errors.New("the hook URL must be https")
+		}
+		if err := st.SetSecret(codesHook, url); err != nil {
+			return err
+		}
+		fmt.Println("Codes hook saved.")
 		return nil
 
 	case "set-client-id":

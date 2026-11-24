@@ -99,7 +99,11 @@ func (f *fake) Raw(_ context.Context, _, rid string) ([]byte, error) {
 	defer f.mu.Unlock()
 	f.raws++
 	m := f.msgs[rid]
-	return []byte("From: Ann <ann@x.com>\r\nSubject: " + m.Subject + "\r\nContent-Type: text/html\r\n\r\n<p>Hello <b>there</b></p>"), nil
+	body := "<p>Hello <b>there</b></p>"
+	if strings.Contains(m.Subject, "code") {
+		body = "<p>Your sign-in code is <b>482913</b>.</p><p>It expires in 10 minutes.</p>"
+	}
+	return []byte("From: Ann <ann@x.com>\r\nSubject: " + m.Subject + "\r\nContent-Type: text/html\r\n\r\n" + body), nil
 }
 
 func (f *fake) SetSeen(_ context.Context, _ string, rids []string, seen bool) error {
@@ -137,7 +141,7 @@ type harness struct {
 	out chan map[string]any
 }
 
-func start(t *testing.T, s Settings, accounts []Account) *harness {
+func start(t *testing.T, s Settings, accounts []Account, setup ...func(*Engine)) *harness {
 	dir := t.TempDir()
 	c, err := cache.Open(filepath.Join(dir, "cache.db"))
 	if err != nil {
@@ -147,6 +151,9 @@ func start(t *testing.T, s Settings, accounts []Account) *harness {
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
 	e := New(c, filepath.Join(dir, "view"), outW, log.New(io.Discard, "", 0), s, accounts)
+	for _, f := range setup {
+		f(e)
+	}
 	h := &harness{t: t, in: inW, out: make(chan map[string]any, 1000)}
 	go func() {
 		dec := json.NewDecoder(outR)
@@ -320,4 +327,35 @@ func TestBadCommands(t *testing.T) {
 	}
 	h.send(map[string]any{"t": "open", "id": 999})
 	h.wait("missing message", isT("error"))
+}
+
+func TestCodeInNewMail(t *testing.T) {
+	a := newFake(true)
+	a.add("old", "Hello", time.Now().Add(-time.Hour))
+	got := make(chan Code, 4)
+	h := start(t, fast, []Account{{ID: "a@x", Kind: "gmail", Provider: a}}, func(e *Engine) {
+		e.OnCode = func(c Code) { got <- c }
+	})
+	h.wait("ok", func(m map[string]any) bool {
+		return m["t"] == "account" && m["account"].(map[string]any)["status"] == "ok"
+	})
+	a.add("promo", "Big sale this weekend", time.Now())
+	a.add("c1", "Your sign-in code", time.Now())
+	ev := h.wait("code event", isT("code"))
+	if ev["code"] != "482913" || ev["from"] != "Ann" || ev["account"] != "a@x" {
+		t.Fatalf("code event %v", ev)
+	}
+	select {
+	case c := <-got:
+		if c.Code != "482913" || c.From != "Ann" {
+			t.Fatalf("OnCode %+v", c)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("OnCode not called")
+	}
+	select {
+	case c := <-got:
+		t.Fatalf("only one code expected, got another: %+v", c)
+	case <-time.After(300 * time.Millisecond):
+	}
 }

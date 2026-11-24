@@ -129,6 +129,12 @@ private:
     bool paneHidden_ = true;
 
     int newCount_ = 0;
+    // The latest sign-in code, shown in the title bar for 10 minutes.
+    struct CodeNote {
+        std::string from, code;
+        double until = 0;
+        double copiedAt = -100;
+    } code_;
     std::string engineError_;
     std::string note_;  // a short message at the bottom of the list
     double noteUntil_ = 0;

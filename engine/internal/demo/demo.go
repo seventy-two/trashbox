@@ -23,6 +23,7 @@ type msg struct {
 
 // Provider is one demo account.
 type Provider struct {
+	codes   bool // gets the TRASHBOX_DEMO_CODE email
 	mu      sync.Mutex
 	folders []mailbox.Folder
 	msgs    map[string][]*msg // folder → messages
@@ -149,9 +150,14 @@ func Accounts() []engine.Account {
 		seeds["inbox"][2].html = strings.Replace(newsletter, "https://images.example.com/allotment/header.jpg", img, 1)
 	}
 	return []engine.Account{
-		{ID: "me@example.com", Kind: "outlook", Provider: build(now, seeds["inbox"], seeds["older"])},
+		{ID: "me@example.com", Kind: "outlook", Provider: withCodes(build(now, seeds["inbox"], seeds["older"]))},
 		{ID: "me.too@example.org", Kind: "gmail", Provider: build(now, seeds2, nil)},
 	}
+}
+
+func withCodes(p *Provider) *Provider {
+	p.codes = true
+	return p
 }
 
 // Folders lists the folders.
@@ -232,8 +238,27 @@ func (p *Provider) SetSeen(_ context.Context, folder string, rids []string, seen
 	return nil
 }
 
-// Watch: the demo has no push.
-func (p *Provider) Watch(context.Context, string, func()) error { return mailbox.ErrNoPush }
+// Watch: the demo has no push, except that with TRASHBOX_DEMO_CODE set the
+// first account gets a sign-in code email a few seconds in, to test codes.
+func (p *Provider) Watch(ctx context.Context, folder string, changed func()) error {
+	if os.Getenv("TRASHBOX_DEMO_CODE") == "" || !p.codes {
+		return mailbox.ErrNoPush
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(3 * time.Second):
+	}
+	p.mu.Lock()
+	p.msgs[folder] = append(p.msgs[folder], &msg{h: mailbox.Header{
+		RID: "code-1", Date: time.Now().Truncate(time.Second), FromName: "Fernhill Bank",
+		FromAddr: "no-reply@fernhill.example", To: "Me", Subject: "Your sign-in code",
+	}, text: "Your Fernhill sign-in code is 739104.\n\nIt expires in 10 minutes."})
+	p.mu.Unlock()
+	changed()
+	<-ctx.Done()
+	return ctx.Err()
+}
 
 // Close does nothing.
 func (p *Provider) Close() error { return nil }
