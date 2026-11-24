@@ -100,6 +100,7 @@ private:
     void drawSidebar(float x, float y, float w, float h);
     void drawList(float x, float y, float w, float h);
     void drawReading(float x, float y, float w, float h);
+    void drawDivider(float left, float x, float y, float h, float room, float minX, float maxX);
     bool iconButton(const char* glyph, const char* tip, float size = 30, bool danger = false);
     bool titleButton(const char* glyph, const char* tip, float x, float w, float h, bool danger = false);
     bool folderRow(const char* label, int unread, bool selected, float indent, bool strongCount);
@@ -139,6 +140,7 @@ private:
     struct Config {
         bool placed = false;
         int x = 0, y = 0, w = 0, h = 0;
+        float listShare = 0.56f;  // the list's share of the room beside the sidebar
         std::vector<std::string> order;  // accounts, top first
         // Folders shown per account; an account not here shows its inbox and junk.
         std::map<std::string, std::set<std::string>> shown;

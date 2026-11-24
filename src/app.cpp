@@ -201,6 +201,8 @@ void App::loadConfig() {
         cfg_.y = int(num(j, "y"));
         cfg_.w = int(num(j, "w"));
         cfg_.h = int(num(j, "h"));
+        if (auto it = j.find("listShare"); it != j.end() && it->is_number())
+            cfg_.listShare = std::clamp(it->get<float>(), 0.1f, 0.9f);
         if (auto it = j.find("order"); it != j.end() && it->is_array())
             for (const auto& a : *it)
                 if (a.is_string()) cfg_.order.push_back(a.get<std::string>());
@@ -215,7 +217,7 @@ void App::loadConfig() {
 
 void App::saveConfig() {
     if (demo_) return;
-    json j = {{"placed", cfg_.placed}, {"x", cfg_.x}, {"y", cfg_.y}, {"w", cfg_.w}, {"h", cfg_.h}, {"order", cfg_.order}};
+    json j = {{"placed", cfg_.placed}, {"x", cfg_.x}, {"y", cfg_.y}, {"w", cfg_.w}, {"h", cfg_.h}, {"listShare", cfg_.listShare}, {"order", cfg_.order}};
     json shown = json::object();
     for (const auto& [acc, ids] : cfg_.shown) shown[acc] = std::vector<std::string>(ids.begin(), ids.end());
     j["shown"] = shown;
@@ -485,7 +487,7 @@ void App::Pump() {
 
 // testStep runs TRASHBOX_STEPS in demo mode: "wait 1.5", "select 2"
 // (the third row), "folder 0 Archive", "unified", "remote", "waitload",
-// "shot C:\\path.png", "quit".
+// "shot C:\\path.png", "mouse x y", "down", "up" (ImGui only), "quit".
 void App::testStep() {
     if (step_ >= steps_.size()) return;
     double now = ImGui::GetTime();
@@ -522,6 +524,16 @@ void App::testStep() {
         list_.clear();
         select(0);
         loadList(false);
+    } else if (cmd == "mouse" || cmd == "down" || cmd == "up") {
+        // Simulated mouse, fed to ImGui only: never the real cursor.
+        ImGuiIO& io = ImGui::GetIO();
+        if (cmd == "mouse") {
+            float mx = 0, my = 0;
+            ss >> mx >> my;
+            io.AddMousePosEvent(mx, my);
+        } else {
+            io.AddMouseButtonEvent(0, cmd == "down");
+        }
     } else if (cmd == "remote") {
         if (body_.id) openBody(body_.id, true);
     } else if (cmd == "shot") {
@@ -569,12 +581,20 @@ void App::Frame() {
     drawTitle(w);
     float top = 38 * k;
     float sideW = w >= 1000 * k ? 230 * k : 0;
-    // The table gets just over half the room; the reading pane the rest.
-    float listW = std::max(420 * k, (w - sideW) * 0.56f);
-    if (w - sideW - listW < 380 * k) listW = std::max(300 * k, w - sideW - 380 * k);
+    // The list's share of the room is the user's (drag the divider); both
+    // sides keep a usable minimum.
+    float room = w - sideW;
+    float minList = 300 * k, minRead = 320 * k;
+    float listW = room * cfg_.listShare;
+    listW = std::max(minList, std::min(listW, room - minRead));
+    if (room - listW < minRead) listW = std::max(200 * k, room - minRead);
     if (sideW > 0) drawSidebar(0, top, sideW, h - top);
+    // A thin gap between the list and the pane is the divider: neither the
+    // list's scrollbar nor the pane's browser window covers it.
+    float gap = 5 * k;
     drawList(sideW, top, listW, h - top);
-    drawReading(sideW + listW, top, w - sideW - listW, h - top);
+    drawReading(sideW + listW + gap, top, w - sideW - listW - gap, h - top);
+    drawDivider(sideW, sideW + listW, top, h - top, room, sideW + minList, w - minRead);
 
     // Keys, unless something's taking typing.
     if (!ImGui::GetIO().WantTextInput) {
@@ -604,6 +624,34 @@ void App::Frame() {
     paneHidden_ = popup || body_.loading || !body_.error.empty() || body_.id == 0;
     reader_->Place(paneRect_, paneHidden_);
     (void)p;
+}
+
+// drawDivider is the grab strip on the list's side of the border with the
+// reading pane (the pane itself is a separate window that takes the mouse).
+// Dragging sets the list's share of the room; it's saved on letting go.
+void App::drawDivider(float left, float x, float y, float h, float room, float minX, float maxX) {
+    const Palette& p = Colours();
+    const float k = scale_;
+    float gap = 5 * k;
+    ImGui::SetCursorScreenPos(ImVec2(x, y));
+    ImGui::InvisibleButton("##divider", ImVec2(gap, h));
+    bool hov = ImGui::IsItemHovered(), active = ImGui::IsItemActive();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(ImVec2(x, y), ImVec2(x + gap, y + h), U32(p.rail));
+    if (hov || active) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+        dl->AddRectFilled(ImVec2(x + 1 * k, y), ImVec2(x + gap - 1 * k, y + h), U32(p.accent, active ? 0.9f : 0.5f));
+    }
+    if (active && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0)) {
+        float nx = std::clamp(ImGui::GetIO().MousePos.x, minX, maxX);
+        cfg_.listShare = std::clamp((nx - left) / room, 0.1f, 0.9f);
+    }
+    if (ImGui::IsItemDeactivated()) saveConfig();
+    if (hov && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+        cfg_.listShare = 0.56f;  // back to the default
+        saveConfig();
+    }
+    if (!active && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) ImGui::SetTooltip("Drag to resize; double-click to reset");
 }
 
 void App::drawTitle(float width) {
@@ -825,7 +873,6 @@ void App::drawList(float x, float y, float w, float h) {
     const float k = scale_;
     ImDrawList* bg = ImGui::GetWindowDrawList();
     bg->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + h), U32(p.bg));
-    bg->AddLine(ImVec2(x + w - 1, y), ImVec2(x + w - 1, y + h), U32(p.border));
 
     // Heading: what's shown.
     std::string title = "All inboxes";
