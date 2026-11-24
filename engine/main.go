@@ -1,5 +1,6 @@
-// Command trashbox-engine is the mail half of trashbox. For now it only has
-// the spike commands that prove each provider can sign in, read and send.
+// Command trashbox-engine is the mail half of trashbox. Run with no
+// arguments, it speaks the protocol in internal/engine on stdin/stdout for
+// the window; "spike" commands sign accounts in and test them by hand.
 package main
 
 import (
@@ -7,9 +8,15 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log"
 	"os"
+	"os/signal"
+	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/seventy-two/trashbox/engine/internal/cache"
+	"github.com/seventy-two/trashbox/engine/internal/engine"
 
 	"github.com/seventy-two/trashbox/engine/internal/gmail"
 	"github.com/seventy-two/trashbox/engine/internal/graph"
@@ -18,7 +25,8 @@ import (
 	"github.com/seventy-two/trashbox/engine/internal/winui"
 )
 
-const usage = `trashbox-engine spike <command> [flags]
+const usage = `trashbox-engine                 run for the window (JSON lines on stdin/stdout)
+trashbox-engine spike <command> [flags]
 
   accounts                        list accounts
   set-client-id <id>              save the Entra app's Application (client) ID
@@ -31,6 +39,13 @@ const usage = `trashbox-engine spike <command> [flags]
 `
 
 func main() {
+	if len(os.Args) == 1 {
+		if err := serve(); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) < 3 || os.Args[1] != "spike" {
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
@@ -39,6 +54,38 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
+}
+
+// serve runs the engine for the window until stdin closes or "quit".
+func serve() error {
+	st, err := store.Open()
+	if err != nil {
+		return err
+	}
+	cfg, err := st.Load()
+	if err != nil {
+		return err
+	}
+	logFile, err := os.OpenFile(filepath.Join(st.Dir, "engine.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
+	}
+	defer logFile.Close()
+	logger := log.New(logFile, "", log.LstdFlags)
+	logger.Printf("starting, %d accounts", len(cfg.Accounts))
+
+	c, err := cache.Open(filepath.Join(st.Dir, "cache.db"))
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	e := engine.New(c, filepath.Join(st.Dir, "view"), os.Stdout, logger, engine.DefaultSettings, providers(st, cfg, logger))
+	e.Run(ctx, os.Stdin)
+	logger.Printf("stopped")
+	return nil
 }
 
 func spike(cmd string, args []string) error {

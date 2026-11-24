@@ -17,11 +17,13 @@ import (
 // DefaultBase is the Graph v1.0 endpoint.
 const DefaultBase = "https://graph.microsoft.com/v1.0"
 
-// Client calls Graph with one account's access token.
+// Client calls Graph for one account.
 type Client struct {
-	Token string
-	Base  string       // defaults to DefaultBase
-	HTTP  *http.Client // defaults to http.DefaultClient
+	Token string // a fixed access token, or
+	// Tokens returns a current access token, refreshing it when needed.
+	Tokens func(ctx context.Context) (string, error)
+	Base   string       // defaults to DefaultBase
+	HTTP   *http.Client // defaults to http.DefaultClient
 }
 
 // Error is a Graph API error response.
@@ -36,10 +38,6 @@ func (e *Error) Error() string {
 }
 
 func (c *Client) do(ctx context.Context, method, path string, in, out any) error {
-	base := c.Base
-	if base == "" {
-		base = DefaultBase
-	}
 	var body io.Reader
 	if in != nil {
 		b, err := json.Marshal(in)
@@ -48,12 +46,47 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 		}
 		body = bytes.NewReader(b)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, base+path, body)
+	return c.send(ctx, method, path, body, func(r io.Reader) error {
+		if out == nil {
+			return nil
+		}
+		return json.NewDecoder(r).Decode(out)
+	})
+}
+
+// doRaw is do for responses that aren't JSON.
+func (c *Client) doRaw(ctx context.Context, method, path string, read func(io.Reader) error) error {
+	return c.send(ctx, method, path, nil, read)
+}
+
+// send makes one request. path is relative to Base, or an absolute URL such
+// as an @odata.nextLink.
+func (c *Client) send(ctx context.Context, method, path string, body io.Reader, read func(io.Reader) error) error {
+	u := path
+	if !strings.HasPrefix(path, "https://") && !strings.HasPrefix(path, "http://") {
+		base := c.Base
+		if base == "" {
+			base = DefaultBase
+		}
+		u = base + path
+	}
+	token := c.Token
+	if c.Tokens != nil {
+		var err error
+		if token, err = c.Tokens(ctx); err != nil {
+			return err
+		}
+	}
+	req, err := http.NewRequestWithContext(ctx, method, u, body)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.Token)
-	if in != nil {
+	req.Header.Set("Authorization", "Bearer "+token)
+	// Immutable IDs survive moves between folders; 200 a page keeps the
+	// first sync of a big inbox to a sensible number of requests.
+	req.Header.Add("Prefer", `IdType="ImmutableId"`)
+	req.Header.Add("Prefer", "odata.maxpagesize=200")
+	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	hc := c.HTTP
@@ -72,10 +105,7 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 		json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&e)
 		return &Error{Status: resp.StatusCode, Code: e.Error.Code, Message: e.Error.Message}
 	}
-	if out == nil {
-		return nil
-	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	return read(resp.Body)
 }
 
 // Me returns the signed-in account's email address.

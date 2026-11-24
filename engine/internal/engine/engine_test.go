@@ -1,0 +1,323 @@
+package engine
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/seventy-two/trashbox/engine/internal/cache"
+	"github.com/seventy-two/trashbox/engine/internal/mailbox"
+)
+
+// fake is an in-memory account with one inbox.
+type fake struct {
+	mu     sync.Mutex
+	msgs   map[string]mailbox.Header
+	push   chan struct{} // nil: no push
+	seenOK []string
+	raws   int
+}
+
+func newFake(push bool) *fake {
+	f := &fake{msgs: map[string]mailbox.Header{}}
+	if push {
+		f.push = make(chan struct{}, 10)
+	}
+	return f
+}
+
+func (f *fake) add(rid, subject string, date time.Time) {
+	f.mu.Lock()
+	f.msgs[rid] = mailbox.Header{RID: rid, Subject: subject, Date: date, FromName: "Ann"}
+	f.mu.Unlock()
+	if f.push != nil {
+		f.push <- struct{}{}
+	}
+}
+
+func (f *fake) Folders(context.Context) ([]mailbox.Folder, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	unread := 0
+	for _, m := range f.msgs {
+		if !m.Seen {
+			unread++
+		}
+	}
+	return []mailbox.Folder{{ID: "IN", Name: "Inbox", Role: mailbox.RoleInbox, Unread: unread, Total: len(f.msgs)}}, nil
+}
+
+func (f *fake) Sync(_ context.Context, _ string, state string, since time.Time, known map[string]time.Time) (mailbox.Delta, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	d := mailbox.Delta{State: "s", Reset: state == ""}
+	for rid, m := range f.msgs {
+		if m.Date.Before(since) {
+			continue
+		}
+		if _, ok := known[rid]; ok && !d.Reset {
+			d.Flags = append(d.Flags, mailbox.Flags{RID: rid, Seen: m.Seen})
+		} else {
+			d.New = append(d.New, m)
+		}
+	}
+	for rid := range known {
+		if _, ok := f.msgs[rid]; !ok {
+			d.Removed = append(d.Removed, rid)
+		}
+	}
+	return d, nil
+}
+
+func (f *fake) Older(_ context.Context, _ string, before time.Time, n int) ([]mailbox.Header, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var hs []mailbox.Header
+	for _, m := range f.msgs {
+		if m.Date.Before(before) {
+			hs = append(hs, m)
+		}
+	}
+	sort.Slice(hs, func(i, j int) bool { return hs[i].Date.After(hs[j].Date) })
+	if len(hs) > n {
+		return hs[:n], true, nil
+	}
+	return hs, false, nil
+}
+
+func (f *fake) Raw(_ context.Context, _, rid string) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.raws++
+	m := f.msgs[rid]
+	return []byte("From: Ann <ann@x.com>\r\nSubject: " + m.Subject + "\r\nContent-Type: text/html\r\n\r\n<p>Hello <b>there</b></p>"), nil
+}
+
+func (f *fake) SetSeen(_ context.Context, _ string, rids []string, seen bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, r := range rids {
+		m := f.msgs[r]
+		m.Seen = seen
+		f.msgs[r] = m
+		f.seenOK = append(f.seenOK, r)
+	}
+	return nil
+}
+
+func (f *fake) Watch(ctx context.Context, _ string, changed func()) error {
+	if f.push == nil {
+		return mailbox.ErrNoPush
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-f.push:
+			changed()
+		}
+	}
+}
+
+func (f *fake) Close() error { return nil }
+
+// harness runs an engine and collects what it says.
+type harness struct {
+	t   *testing.T
+	in  *io.PipeWriter
+	out chan map[string]any
+}
+
+func start(t *testing.T, s Settings, accounts []Account) *harness {
+	dir := t.TempDir()
+	c, err := cache.Open(filepath.Join(dir, "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	e := New(c, filepath.Join(dir, "view"), outW, log.New(io.Discard, "", 0), s, accounts)
+	h := &harness{t: t, in: inW, out: make(chan map[string]any, 1000)}
+	go func() {
+		dec := json.NewDecoder(outR)
+		for {
+			var m map[string]any
+			if err := dec.Decode(&m); err != nil {
+				return
+			}
+			h.out <- m
+		}
+	}()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { e.Run(ctx, inR); close(done) }()
+	t.Cleanup(func() {
+		h.send(map[string]any{"t": "quit"})
+		cancel()
+		<-done
+		outW.Close()
+	})
+	return h
+}
+
+func (h *harness) send(cmd map[string]any) {
+	b, _ := json.Marshal(cmd)
+	h.in.Write(append(b, '\n'))
+}
+
+// wait returns the first message matching ok, failing after a while.
+func (h *harness) wait(what string, ok func(map[string]any) bool) map[string]any {
+	h.t.Helper()
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case m := <-h.out:
+			if ok(m) {
+				return m
+			}
+		case <-deadline:
+			h.t.Fatalf("timed out waiting for %s", what)
+		}
+	}
+}
+
+func isT(t string) func(map[string]any) bool {
+	return func(m map[string]any) bool { return m["t"] == t }
+}
+
+func subjectsOf(m map[string]any) []string {
+	var out []string
+	for _, x := range m["messages"].([]any) {
+		out = append(out, x.(map[string]any)["subject"].(string))
+	}
+	return out
+}
+
+var fast = Settings{Window: 30 * 24 * time.Hour, Poll: 50 * time.Millisecond, PushPoll: time.Hour,
+	Retry: 20 * time.Millisecond, Debounce: 0, OlderPage: 2}
+
+func TestEngineEndToEnd(t *testing.T) {
+	now := time.Now()
+	a, b := newFake(true), newFake(false)
+	a.add("a1", "a-new", now.Add(-time.Hour))
+	a.add("a2", "a-old", now.AddDate(0, 0, -10))
+	a.add("a3", "a-ancient1", now.AddDate(0, -3, 0))
+	a.add("a4", "a-ancient2", now.AddDate(0, -4, 0))
+	a.add("a5", "a-ancient3", now.AddDate(0, -5, 0))
+	b.add("b1", "b-mid", now.AddDate(0, 0, -2))
+
+	h := start(t, fast, []Account{{ID: "a@x", Kind: "gmail", Provider: a}, {ID: "b@x", Kind: "outlook", Provider: b}})
+	ok := map[any]bool{}
+	h.wait("both accounts ok", func(m map[string]any) bool {
+		if m["t"] == "account" && m["account"].(map[string]any)["status"] == "ok" {
+			ok[m["account"].(map[string]any)["id"]] = true
+		}
+		return len(ok) == 2
+	})
+
+	h.send(map[string]any{"t": "hello", "req": 1})
+	hello := h.wait("hello", isT("hello"))
+	if hello["req"] != float64(1) || len(hello["accounts"].([]any)) != 2 {
+		t.Fatalf("hello %v", hello)
+	}
+
+	// Unified inbox, newest first, across accounts.
+	h.send(map[string]any{"t": "list", "view": "unified", "limit": 3})
+	l := h.wait("list", isT("list"))
+	if got := fmt.Sprint(subjectsOf(l)); got != "[a-new b-mid a-old]" || l["more"] != true {
+		t.Fatalf("page 1 %s more=%v", got, l["more"])
+	}
+	// Next page reaches past the window: older mail comes from the server.
+	last := l["messages"].([]any)[2].(map[string]any)
+	h.send(map[string]any{"t": "list", "view": "unified", "limit": 3, "beforeDate": last["date"], "beforeId": last["id"]})
+	l = h.wait("list 2", isT("list"))
+	if got := fmt.Sprint(subjectsOf(l)); got != "[a-ancient1 a-ancient2]" {
+		t.Fatalf("page 2 %s", got)
+	}
+	last = l["messages"].([]any)[1].(map[string]any)
+	h.send(map[string]any{"t": "list", "view": "unified", "limit": 3, "beforeDate": last["date"], "beforeId": last["id"]})
+	l = h.wait("list 3", isT("list"))
+	if got := fmt.Sprint(subjectsOf(l)); got != "[a-ancient3]" || l["more"] != false {
+		t.Fatalf("page 3 %s more=%v", got, l["more"])
+	}
+
+	// New mail: pushed for a, polled for b.
+	a.add("a6", "pushed", now)
+	n := h.wait("newmail a", isT("newmail"))
+	if n["subject"] != "pushed" || n["account"] != "a@x" || n["from"] != "Ann" {
+		t.Fatalf("newmail %v", n)
+	}
+	b.add("b2", "polled", now)
+	n = h.wait("newmail b", isT("newmail"))
+	if n["subject"] != "polled" {
+		t.Fatalf("newmail %v", n)
+	}
+
+	// Open renders a page without marking anything read.
+	id := n["id"]
+	h.send(map[string]any{"t": "open", "id": id})
+	body := h.wait("body", isT("body"))
+	page := body["page"].(map[string]any)
+	if !strings.HasPrefix(page["url"].(string), "https://trashbox.view/") || body["subject"] != "polled" {
+		t.Fatalf("body %v", body)
+	}
+	doc, err := os.ReadFile(page["path"].(string))
+	if err != nil || !strings.Contains(string(doc), "<p>Hello <b>there</b></p>") {
+		t.Fatalf("page %s %v", doc, err)
+	}
+	if len(b.seenOK) != 0 {
+		t.Fatal("open must not mark read")
+	}
+	// A second open comes from the cache.
+	h.send(map[string]any{"t": "open", "id": id})
+	h.wait("body again", isT("body"))
+	if b.raws != 1 {
+		t.Fatalf("raw fetched %d times", b.raws)
+	}
+
+	// Marking read goes to the server and the cache.
+	h.send(map[string]any{"t": "seen", "ids": []any{id}, "seen": true})
+	h.wait("changed", func(m map[string]any) bool { return m["t"] == "changed" && m["account"] == "b@x" })
+	if len(b.seenOK) != 1 || b.seenOK[0] != "b2" {
+		t.Fatalf("server seen %v", b.seenOK)
+	}
+	h.send(map[string]any{"t": "list", "view": "folder", "account": "b@x", "folder": "IN", "limit": 1})
+	l = h.wait("folder list", isT("list"))
+	if m := l["messages"].([]any)[0].(map[string]any); m["subject"] != "polled" || m["seen"] != true {
+		t.Fatalf("after seen %v", m)
+	}
+
+	// Removal on the server reaches the cache.
+	b.mu.Lock()
+	delete(b.msgs, "b1")
+	b.mu.Unlock()
+	h.wait("changed after delete", func(m map[string]any) bool { return m["t"] == "changed" && m["account"] == "b@x" })
+	h.send(map[string]any{"t": "list", "view": "folder", "account": "b@x", "folder": "IN"})
+	l = h.wait("folder list 2", isT("list"))
+	if got := fmt.Sprint(subjectsOf(l)); got != "[polled]" {
+		t.Fatalf("after delete %s", got)
+	}
+}
+
+func TestBadCommands(t *testing.T) {
+	h := start(t, fast, nil)
+	h.in.Write([]byte("not json\n"))
+	h.wait("parse error", isT("error"))
+	h.send(map[string]any{"t": "nope", "req": "x"})
+	e := h.wait("unknown", isT("error"))
+	if e["req"] != "x" {
+		t.Fatalf("%v", e)
+	}
+	h.send(map[string]any{"t": "open", "id": 999})
+	h.wait("missing message", isT("error"))
+}
